@@ -1,0 +1,6 @@
+# Training config (see common/config.py). Changing backbone or fine-tuning needs no code change.
+model: {arch: fastvit_t8, source: timm, pretrained: imagenet}
+# base_model: models:/leaf-disease@champion   # optional: fine-tune from a registered model
+head: {num_classes: 5}
+data: {dataset: durian, version: v7}
+train: {epochs: 20, batch_size: 64, lr: 3e-4, seed: 42}

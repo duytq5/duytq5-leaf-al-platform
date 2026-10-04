@@ -1,0 +1,51 @@
+# Runs on the single EC2 instance: Postgres (metadata + MLflow backend) and MLflow.
+# Label Studio joins this file in Phase 2.
+#
+# Secrets come from .env next to this file (gitignored). On EC2, write .env
+# from SSM Parameter Store before `docker compose up -d`; see README.md.
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-al}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+      POSTGRES_DB: ${POSTGRES_DB:-al}
+      MLFLOW_DB: ${MLFLOW_DB:-mlflow}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./postgres/init:/docker-entrypoint-initdb.d:ro
+    ports:
+      # Lambdas run outside a VPC, so Postgres is reachable from the internet;
+      # the EC2 security group must restrict who can connect.
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  mlflow:
+    build: ./mlflow
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      # Instance role on EC2 provides S3 credentials; only the region is needed.
+      AWS_DEFAULT_REGION: ${AWS_REGION:?set AWS_REGION in .env}
+    command:
+      - mlflow
+      - server
+      - --host=0.0.0.0
+      - --port=5000
+      - --backend-store-uri=postgresql://${POSTGRES_USER:-al}:${POSTGRES_PASSWORD}@postgres:5432/${MLFLOW_DB:-mlflow}
+      # Clients (the worker) write artifacts straight to S3 with their own credentials.
+      - --default-artifact-root=s3://${MODELS_BUCKET:?set MODELS_BUCKET in .env}/mlflow-artifacts
+      - --no-serve-artifacts
+    ports:
+      - "5000:5000"
+
+volumes:
+  pgdata:

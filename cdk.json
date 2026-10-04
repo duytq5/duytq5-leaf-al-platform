@@ -1,0 +1,7 @@
+{
+  "app": "python -m infra.app",
+  "watch": {
+    "include": ["infra/**", "lambdas/**", "common/**", "selection/**"]
+  },
+  "context": {}
+}
