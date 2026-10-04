@@ -16,8 +16,8 @@ PROBS = np.array(
 POOL = PoolData(ids=list("abcde"), probs=PROBS)
 
 
-def test_all_doc_strategies_registered():
-    assert {"random", "least_confidence", "margin", "entropy", "coreset"} <= set(STRATEGIES)
+def test_exactly_the_thesis_strategies_are_registered():
+    assert set(STRATEGIES) == {"random", "least_confidence", "margin", "entropy", "class_balanced"}
 
 
 @pytest.mark.parametrize(
@@ -32,7 +32,7 @@ def test_uncertainty_ranking(name, expected):
     assert get_strategy(name).select(POOL, EMPTY, k=2) == expected
 
 
-@pytest.mark.parametrize("name", ["least_confidence", "margin", "entropy"])
+@pytest.mark.parametrize("name", ["least_confidence", "margin", "entropy", "class_balanced"])
 def test_uncertainty_edge_cases(name):
     s = get_strategy(name)
     assert s.select(POOL, EMPTY, k=0) == []
@@ -47,46 +47,42 @@ def test_uncertainty_ties_keep_pool_order():
     assert get_strategy("entropy").select(pool, EMPTY, k=2) == ["x", "y"]
 
 
-def _clusters():
-    # Three tight clusters; a good batch of 3 takes one from each.
-    rng = np.random.default_rng(0)
-    centers = np.array([[0.0, 0.0], [10.0, 0.0], [0.0, 10.0]])
-    emb = np.concatenate([c + 0.1 * rng.standard_normal((20, 2)) for c in centers])
-    ids = [f"{c}{i}" for c in "ABC" for i in range(20)]
-    return PoolData(ids=ids, embeddings=emb)
+def _labeled(labels):
+    return PoolData(ids=[f"L{i}" for i in range(len(labels))], labels=np.array(labels))
 
 
-def test_coreset_covers_clusters():
-    picked = get_strategy("coreset", seed=3).select(_clusters(), EMPTY, k=3)
-    assert len(set(picked)) == 3
-    assert {p[0] for p in picked} == {"A", "B", "C"}
+def test_class_balanced_matches_formula():
+    labeled = _labeled([0, 0, 0, 0, 1])  # class 0: 4, class 1: 1, class 2: 0
+    n = np.array([4, 1, 0])
+    freq = (n + 1) / (n.sum() + 3)
+    p = np.clip(PROBS, 1e-12, 1.0)
+    h = -(p * np.log(p)).sum(axis=1)
+    expected = h * (PROBS / freq).sum(axis=1)
+    order = [POOL.ids[i] for i in np.argsort(-expected, kind="stable")]
+    assert get_strategy("class_balanced").select(POOL, labeled, k=5) == order
 
 
-def test_coreset_avoids_labeled_region():
-    labeled = PoolData(ids=["L0"], embeddings=np.array([[0.0, 0.0]]))
-    picked = get_strategy("coreset").select(_clusters(), labeled, k=2)
-    assert {p[0] for p in picked} == {"B", "C"}
+def test_class_balanced_prefers_rare_class_at_equal_entropy():
+    # Same entropy, different predicted class: the rare class should win.
+    probs = np.array([[0.8, 0.1, 0.1], [0.1, 0.1, 0.8]])
+    pool = PoolData(ids=["common", "rare"], probs=probs)
+    labeled = _labeled([0] * 20 + [1] * 5)
+    assert get_strategy("entropy").select(pool, EMPTY, k=1) == ["common"]
+    assert get_strategy("class_balanced").select(pool, labeled, k=1) == ["rare"]
 
 
-def test_coreset_seeded_and_unique_with_duplicates():
-    pool = PoolData(ids=list("pqrs"), embeddings=np.zeros((4, 3)))
-    a = get_strategy("coreset", seed=1).select(pool, EMPTY, k=4)
-    assert sorted(a) == list("pqrs")
-    assert a == get_strategy("coreset", seed=1).select(pool, EMPTY, k=4)
+def test_class_balanced_without_labels_is_uniform_entropy():
+    # Nothing labeled: freq is uniform, so the order equals plain entropy.
+    assert get_strategy("class_balanced").select(POOL, EMPTY, k=5) == get_strategy(
+        "entropy"
+    ).select(POOL, EMPTY, k=5)
 
 
-def test_coreset_cosine_metric():
-    emb = np.array([[1.0, 0.0], [100.0, 0.0], [0.0, 1.0]])
-    pool = PoolData(ids=["near", "far_same_dir", "other_dir"], embeddings=emb)
-    labeled = PoolData(ids=["L"], embeddings=np.array([[1.0, 0.0]]))
-    cos = get_strategy("coreset", params={"metric": "cosine"}).select(pool, labeled, k=1)
-    euc = get_strategy("coreset").select(pool, labeled, k=1)
-    assert cos == ["other_dir"]
-    assert euc == ["far_same_dir"]
-
-
-def test_coreset_needs_embeddings():
-    with pytest.raises(ValueError, match="embeddings"):
-        get_strategy("coreset").select(POOL, EMPTY, k=1)
-    with pytest.raises(ValueError, match="labeled"):
-        get_strategy("coreset").select(_clusters(), PoolData(ids=["L"]), k=1)
+def test_class_balanced_validates_labels():
+    s = get_strategy("class_balanced")
+    with pytest.raises(ValueError, match="labels"):
+        s.select(POOL, PoolData(ids=["L0"]), k=1)
+    with pytest.raises(ValueError, match="class indices"):
+        s.select(POOL, _labeled([5]), k=1)
+    with pytest.raises(ValueError, match="labels must have shape"):
+        PoolData(ids=["a", "b"], labels=np.array([0]))

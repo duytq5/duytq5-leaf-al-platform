@@ -27,11 +27,16 @@ class StrategyParams(BaseModel):
 
 @dataclass(frozen=True)
 class PoolData:
-    """Images plus the score outputs for them, row-aligned with `ids`."""
+    """Images plus the score outputs for them, row-aligned with `ids`.
+
+    `labels` holds class indices (columns of `probs`, in the dataset's label
+    list order) and is set for the labeled set only.
+    """
 
     ids: list[str]
     probs: np.ndarray | None = None  # (n, num_classes)
     embeddings: np.ndarray | None = None  # (n, dim)
+    labels: np.ndarray | None = None  # (n,) int class indices
 
     def __post_init__(self) -> None:
         n = len(self.ids)
@@ -39,6 +44,8 @@ class PoolData:
             arr = getattr(self, name)
             if arr is not None and (arr.ndim != 2 or arr.shape[0] != n):
                 raise ValueError(f"{name} must have shape ({n}, d), got {arr.shape}")
+        if self.labels is not None and self.labels.shape != (n,):
+            raise ValueError(f"labels must have shape ({n},), got {self.labels.shape}")
 
     def __len__(self) -> int:
         return len(self.ids)

@@ -1,7 +1,8 @@
 """Uncertainty sampling on predicted class probabilities.
 
-Each strategy turns probs into an uncertainty score (higher = more uncertain)
-and takes the top k. Ties keep pool order, so a selection is reproducible.
+Each strategy turns probs into a score (higher = label first) and takes the
+top k. Ties keep pool order, so a selection is reproducible. All of them need
+only one inference pass over the pool.
 """
 
 import numpy as np
@@ -13,6 +14,11 @@ def _require_probs(pool: PoolData) -> np.ndarray:
     if pool.probs is None:
         raise ValueError("this strategy needs probs in the pool scores")
     return pool.probs
+
+
+def _entropy(probs: np.ndarray) -> np.ndarray:
+    p = np.clip(probs, 1e-12, 1.0)
+    return -(p * np.log(p)).sum(axis=1)
 
 
 def top_k(pool: PoolData, scores: np.ndarray, k: int) -> list[str]:
@@ -47,6 +53,28 @@ class Entropy(Strategy):
     requires = frozenset({"probs"})
 
     def select(self, pool: PoolData, labeled: PoolData, k: int) -> list[str]:
+        return top_k(pool, _entropy(_require_probs(pool)), k)
+
+
+@register("class_balanced")
+class ClassBalanced(Strategy):
+    """Entropy weighted towards classes that are rare in the labeled set.
+
+    freq(y)  = (n_y + 1) / (N + C)            Laplace-smoothed labeled class frequency
+    score(x) = H(x) * sum_y p(y|x) / freq(y)
+    """
+
+    description = "Entropy x inverse labeled-class frequency: favours likely rare-class images."
+    requires = frozenset({"probs"})
+
+    def select(self, pool: PoolData, labeled: PoolData, k: int) -> list[str]:
         probs = _require_probs(pool)
-        p = np.clip(probs, 1e-12, 1.0)
-        return top_k(pool, -(p * np.log(p)).sum(axis=1), k)
+        num_classes = probs.shape[1]
+        if len(labeled) and labeled.labels is None:
+            raise ValueError("class_balanced needs labels for the labeled set")
+        labels = labeled.labels if len(labeled) else np.array([], dtype=int)
+        if labels.size and (labels.min() < 0 or labels.max() >= num_classes):
+            raise ValueError(f"labeled class indices must be in [0, {num_classes})")
+        counts = np.bincount(labels.astype(int), minlength=num_classes)
+        freq = (counts + 1) / (counts.sum() + num_classes)
+        return top_k(pool, _entropy(probs) * (probs / freq).sum(axis=1), k)
