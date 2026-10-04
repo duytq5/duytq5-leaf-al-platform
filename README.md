@@ -34,20 +34,21 @@ Extras: `worker` (torch, timm, mlflow, boto3), `lambdas` (boto3), `infra` (aws-c
 On the RTX 5070 machine install torch from the CUDA 12.8 index:
 `uv pip install torch --index-url https://download.pytorch.org/whl/cu128`.
 
-### CDK
+No AWS credentials are needed to build, lint or test. CDK synth also runs
+offline: `source .venv/bin/activate && npx aws-cdk synth`.
 
-```bash
-source .venv/bin/activate
-npx aws-cdk synth            # nothing is deployed by synth
-```
-
-### EC2 services
+### Local services
 
 ```bash
 cd deploy/ec2
-cp .env.example .env         # fill in; on EC2 generate it from SSM Parameter Store
+cp .env.example .env         # local values only; never commit .env
 docker compose up -d
 ```
+
+### AWS
+
+Nothing is deployed from this repo automatically. The owner runs the AWS
+steps by hand; the exact commands are in [docs/aws-setup.md](docs/aws-setup.md).
 
 ## Choosing a strategy per round
 
