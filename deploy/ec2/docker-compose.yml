@@ -2,7 +2,11 @@
 # Label Studio joins this file in Phase 2.
 #
 # Secrets come from .env next to this file (gitignored). On EC2, write .env
-# from SSM Parameter Store before `docker compose up -d`; see README.md.
+# from SSM Parameter Store before `docker compose up -d`; see docs/aws-setup.md.
+#
+# All state lives under DATA_DIR. On EC2 that is a separate EBS volume mounted
+# at /data that is kept when the instance is terminated, so a new instance can
+# re-attach it and pick up where the old one stopped. MLflow artifacts are in S3.
 
 services:
   postgres:
@@ -14,7 +18,7 @@ services:
       POSTGRES_DB: ${POSTGRES_DB:-al}
       MLFLOW_DB: ${MLFLOW_DB:-mlflow}
     volumes:
-      - pgdata:/var/lib/postgresql/data
+      - ${DATA_DIR:?set DATA_DIR in .env}/postgres:/var/lib/postgresql/data
       - ./postgres/init:/docker-entrypoint-initdb.d:ro
     ports:
       # Lambdas run outside a VPC, so Postgres is reachable from the internet;
@@ -46,6 +50,3 @@ services:
       - --no-serve-artifacts
     ports:
       - "5000:5000"
-
-volumes:
-  pgdata:

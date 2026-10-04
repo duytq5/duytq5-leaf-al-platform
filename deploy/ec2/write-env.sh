@@ -18,5 +18,7 @@ POSTGRES_DB=al
 MLFLOW_DB=mlflow
 AWS_REGION=$REGION
 MODELS_BUCKET=$(get buckets/models)
+DATA_BUCKET=$(get buckets/data)
+DATA_DIR=/data
 EOF
 echo "wrote $(dirname "$0")/.env"
