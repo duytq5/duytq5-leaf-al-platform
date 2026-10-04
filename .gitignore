@@ -1,0 +1,39 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+build/
+dist/
+
+# Secrets: never commit. Real values live in SSM Parameter Store.
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+credentials
+.aws/
+
+# AWS CDK
+cdk.out/
+cdk.context.json
+
+# Data, caches and model outputs (images live in S3, not git)
+data/
+cache/
+mlruns/
+mlartifacts/
+*.onnx
+*.pt
+*.pth
+*.ckpt
+*.parquet
+
+# Editors / OS
+.idea/
+.vscode/
+.DS_Store
