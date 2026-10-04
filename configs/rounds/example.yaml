@@ -1,0 +1,11 @@
+# One AL round, chosen by a human (see common/round.py).
+# List strategies and their parameters:  uv run al strategies
+# Check this file before starting a round: uv run al check-round configs/rounds/example.yaml
+dataset: durian  # must match data.dataset in the train config
+mode: simulation
+train_config: configs/train/example.yaml
+selection:
+  strategy: random
+  params: {}
+  k: 50
+  seed: 42

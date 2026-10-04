@@ -15,7 +15,9 @@ uploads images and downloads ONNX models.
 | `lambdas/` | Lambda handlers (select, oracle; later edge API, validation, Label Studio webhook) |
 | `infra/` | AWS CDK app (Python), one stack: `LeafAlPlatform` |
 | `deploy/ec2/` | Docker Compose for the single EC2 instance: Postgres + MLflow |
+| `cli/` | Operator CLI `al` |
 | `configs/train/` | YAML training configs |
+| `configs/rounds/` | YAML round configs: strategy, its parameters and k, chosen by a human per round |
 | `tests/` | Unit tests |
 
 ## Development
@@ -46,6 +48,29 @@ cd deploy/ec2
 cp .env.example .env         # fill in; on EC2 generate it from SSM Parameter Store
 docker compose up -d
 ```
+
+## Choosing a strategy per round
+
+Selection is never hardcoded. Before each round you look at the data and the
+latest scores, then write a round config:
+
+```yaml
+dataset: durian
+mode: simulation
+train_config: configs/train/example.yaml
+selection: {strategy: random, params: {}, k: 50, seed: 42}
+```
+
+```bash
+uv run al strategies                                   # names, required inputs, parameters
+uv run al check-round configs/rounds/example.yaml      # validate before starting
+```
+
+Unknown strategies, misspelled parameters and invalid k are rejected. The
+chosen strategy, parameters and k are stored on the round's row, so every
+round can be reproduced. Phase 1 adds `al round preview` (dry-run a strategy
+on the latest scores: which images it would pick, their predicted classes and
+confidence) and `al round start`.
 
 ## Rules
 

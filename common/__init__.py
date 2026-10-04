@@ -9,6 +9,7 @@ from common.config import TrainConfig
 from common.edge import CaptureRequest, CaptureResponse, CaptureStatus, DeviceConfig
 from common.jobs import ExportJob, JobMessage, JobType, ScoreJob, TrainJob, parse_job
 from common.manifest import ModelManifest
+from common.round import RoundConfig, SelectionConfig
 from common.types import ImageSource, ImageStatus, Split
 
 __all__ = [
@@ -22,7 +23,9 @@ __all__ = [
     "JobMessage",
     "JobType",
     "ModelManifest",
+    "RoundConfig",
     "ScoreJob",
+    "SelectionConfig",
     "Split",
     "TrainConfig",
     "TrainJob",
