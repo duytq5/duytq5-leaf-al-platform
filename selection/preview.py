@@ -10,7 +10,7 @@ from dataclasses import dataclass, field
 import numpy as np
 
 from common.round import SelectionConfig
-from selection.base import PoolData, from_config
+from selection.base import LabeledStats, PoolData, from_config
 
 
 @dataclass
@@ -28,7 +28,7 @@ class SelectionPreview:
 def preview_selection(
     cfg: SelectionConfig,
     pool: PoolData,
-    labeled: PoolData,
+    labeled: LabeledStats,
     labels: list[str] | None = None,
 ) -> SelectionPreview:
     strategy = from_config(cfg)
