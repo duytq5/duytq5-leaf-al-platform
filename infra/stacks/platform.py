@@ -262,7 +262,8 @@ class PlatformStack(Stack):
             allow_all_outbound=True,
         )
         # No SSH: the owner connects with SSM Session Manager.
-        # Postgres opens to the Lambdas once it has TLS (database schema PR).
+        # Postgres requires TLS (deploy/ec2/postgres/pg_hba.conf); it opens to
+        # the Lambdas in the PR that adds the first one that needs it.
         sources = {c for c in (admin_cidr, worker_cidr) if c}
         for cidr in sorted(sources):
             sg.add_ingress_rule(ec2.Peer.ipv4(cidr), ec2.Port.tcp(MLFLOW_PORT), "MLflow")

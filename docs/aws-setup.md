@@ -53,6 +53,20 @@ aws ssm put-parameter --name /leaf-al/postgres/password --type SecureString \
   --value "$(openssl rand -hex 24)"
 ```
 
+Postgres only accepts TLS connections from the network (the Lambdas reach it
+over the internet). Make a self-signed certificate on your machine and store it
+next to the password. The key is a SecureString; the certificate is not secret
+and clients pin it:
+
+```bash
+deploy/ec2/make-tls.sh /tmp/leaf-al-tls
+aws ssm put-parameter --name /leaf-al/postgres/tls-key --type SecureString \
+  --value file:///tmp/leaf-al-tls/server.key
+aws ssm put-parameter --name /leaf-al/postgres/tls-cert --type String \
+  --value file:///tmp/leaf-al-tls/server.crt
+rm -r /tmp/leaf-al-tls
+```
+
 The stack writes the bucket names and queue URL to SSM itself.
 
 ## 2. CDK stack
@@ -120,7 +134,7 @@ sudo tail -n 20 /var/log/cloud-init-output.log
 df -h /data
 sudo su - ec2-user
 git clone https://github.com/duytq5/duytq5-leaf-al-platform.git && cd duytq5-leaf-al-platform/deploy/ec2
-AWS_REGION=<region> ./write-env.sh     # writes .env from SSM, mode 600
+AWS_REGION=<region> ./write-env.sh     # writes .env and tls/ from SSM, mode 600
 docker compose up -d --build
 ```
 
@@ -141,8 +155,51 @@ aws ec2 stop-instances  --instance-ids <InstanceId>
 aws ec2 start-instances --instance-ids <InstanceId>
 ```
 
-Postgres opens to the Lambdas (which run outside a VPC) only once it has TLS
-and a strong password, in the database schema PR.
+`write-env.sh` refuses a Postgres password shorter than 32 characters.
+Postgres rejects every network connection without TLS (`postgres/pg_hba.conf`),
+MLflow's included. Port 5432 is open only to `adminCidr` and `workerCidr` until
+the first Lambda that needs the database is added.
+
+If the services already run from an earlier version of this repo, create the
+two TLS parameters (section 1), then on the instance:
+
+```bash
+cd ~/duytq5-leaf-al-platform && git pull && cd deploy/ec2
+AWS_REGION=<region> ./write-env.sh
+docker compose up -d --build           # recreates Postgres with TLS; data is kept
+```
+
+## 3a. Database tables and seed data
+
+Run from your own machine (your IP is `adminCidr`). Get the pinned certificate
+and build the connection string:
+
+```bash
+aws ssm get-parameter --name /leaf-al/postgres/tls-cert \
+  --query Parameter.Value --output text > postgres-server.crt
+PG_PASSWORD=$(aws ssm get-parameter --name /leaf-al/postgres/password \
+  --with-decryption --query Parameter.Value --output text)
+PG_HOST=$(aws ec2 describe-instances --instance-ids <InstanceId> \
+  --query 'Reservations[0].Instances[0].PublicIpAddress' --output text)
+export DATABASE_URL="postgresql://al:$PG_PASSWORD@$PG_HOST:5432/al?sslmode=verify-ca&sslrootcert=postgres-server.crt"
+export DATA_BUCKET=$(aws ssm get-parameter --name /leaf-al/buckets/data \
+  --query Parameter.Value --output text)
+```
+
+Create the tables, then seed each dataset. `<image-dir>` has one sub-folder of
+JPEGs per label, named as in the dataset config. Check the split with
+`--dry-run` first; both commands are safe to re-run if they stop half-way.
+
+```bash
+uv run al db migrate
+uv run al seed configs/datasets/rocole.yaml <rocole-dir> --dry-run
+uv run al seed configs/datasets/rocole.yaml <rocole-dir>
+```
+
+The seed uploads with your own AWS credentials: it needs `s3:PutObject` and
+`s3:GetObject` on `raw/*` and `s3:ListBucket` on the data bucket (an admin
+profile has them). There is no durian config yet: add
+`configs/datasets/durian.yaml` once its class list is settled.
 
 ## 4. Worker credentials (on the RTX 5070 machine)
 

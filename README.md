@@ -10,12 +10,14 @@ uploads images and downloads ONNX models.
 | Path | What lives there |
 | --- | --- |
 | `common/` | Shared Pydantic models: SQS job messages, Edge API bodies, model manifest, training config, S3 key layout |
+| `db/` | Postgres schema (`db/migrations/*.sql`), migration runner, dataset seed script |
 | `selection/` | Selection strategy registry (`@register("name")`) and the built-in strategies |
 | `worker/` | Local GPU worker: long-polls SQS, runs `train` / `score` / `export` jobs |
 | `lambdas/` | Lambda handlers (select, oracle; later edge API, validation, Label Studio webhook) |
 | `infra/` | AWS CDK app (Python), one stack: `LeafAlPlatform` |
 | `deploy/ec2/` | Docker Compose for the single EC2 instance: Postgres + MLflow |
 | `cli/` | Operator CLI `al` |
+| `configs/datasets/` | YAML dataset configs: the label list and the fixed train/val/test split |
 | `configs/train/` | YAML training configs |
 | `configs/rounds/` | YAML round configs: strategy, its parameters and k, chosen by a human per round |
 | `tests/` | Unit tests |
@@ -42,8 +44,35 @@ offline: `source .venv/bin/activate && npx aws-cdk synth`.
 ```bash
 cd deploy/ec2
 cp .env.example .env         # local values only; never commit .env
+./make-tls.sh                # self-signed Postgres certificate in ./tls (gitignored)
 docker compose up -d
 ```
+
+Postgres only accepts network connections over TLS, MLflow's included. To run
+the database tests against it:
+
+```bash
+. deploy/ec2/.env
+export TEST_DATABASE_URL="postgresql://al:$POSTGRES_PASSWORD@127.0.0.1:5432/al?sslmode=verify-ca&sslrootcert=deploy/ec2/tls/server.crt"
+uv run pytest                # without TEST_DATABASE_URL the database tests are skipped
+```
+
+### Database and seed data
+
+```bash
+export DATABASE_URL=...      # as above, or the EC2 one from docs/aws-setup.md
+uv run al db migrate         # create or update the tables; safe to re-run
+uv run al seed configs/datasets/rocole.yaml <image-dir> --dry-run   # show the split
+uv run al seed configs/datasets/rocole.yaml <image-dir> --bucket <data-bucket>
+```
+
+`<image-dir>` has one sub-folder of JPEGs per label, named as in the dataset
+config. The seed uploads each image to `raw/<dataset>/<sha256>.jpg`, then records
+it with a split that is stratified per class and fixed by the split seed.
+Re-running it skips what is already there, and an image keeps its first split.
+Train images become the AL pool (`unlabeled`), with their ground truth only in
+`oracle_labels`. Val and test images are `labeled` and can never enter the pool
+(a database constraint enforces it).
 
 ### AWS
 
