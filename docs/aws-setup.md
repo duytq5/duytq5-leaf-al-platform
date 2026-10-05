@@ -2,8 +2,8 @@
 
 Everything in this repo builds and tests without AWS credentials. Nothing here
 is deployed automatically; you run these commands yourself, from your own
-machine with your own AWS profile. Sections marked *(Phase 1)* need resources
-the CDK stack does not create yet; they become real as Phase 1 lands.
+machine with your own AWS profile. Sections marked *(later in Phase 1)* need
+resources the CDK stack does not create yet.
 
 Set these once per shell:
 
@@ -12,143 +12,189 @@ export AWS_PROFILE=<your-profile>
 export AWS_REGION=ap-southeast-1          # pick one region and keep it
 export CDK_DEFAULT_REGION=$AWS_REGION
 export CDK_DEFAULT_ACCOUNT=$(aws sts get-caller-identity --query Account --output text)
+export MY_IP=$(curl -s https://checkip.amazonaws.com)/32
 ```
 
-## 1. Budget alert (do this first)
+## What the stack creates
 
-```bash
-aws budgets create-budget --account-id "$CDK_DEFAULT_ACCOUNT" \
-  --budget '{"BudgetName":"leaf-al-monthly","BudgetLimit":{"Amount":"20","Unit":"USD"},"TimeUnit":"MONTHLY","BudgetType":"COST"}' \
-  --notifications-with-subscribers '[{"Notification":{"NotificationType":"ACTUAL","ComparisonOperator":"GREATER_THAN","Threshold":80,"ThresholdType":"PERCENTAGE"},"Subscribers":[{"SubscriptionType":"EMAIL","Address":"<your-email>"}]}]'
-```
+`LeafAlPlatform` (`infra/stacks/platform.py`):
 
-Change `20` to your monthly limit.
+| Resource | Notes |
+| --- | --- |
+| S3 data bucket (`al-data`) | Private, SSE-S3, HTTPS only. `backups/` objects expire after 30 days. Kept on `cdk destroy`. |
+| S3 models bucket (`al-models`) | Same, plus versioning (old versions expire after 90 days). Kept on `cdk destroy`. |
+| SQS job queue + dead-letter queue | 20 s long polling, 30 min visibility, 14-day retention, a job goes to the DLQ after 3 failed receives. |
+| IAM user for the GPU worker | Consume jobs, report Step Functions task results, read `raw/` and `manifests/`, write `scores/`, read/write `mlflow-artifacts/`. No access key: you create it (section 4). |
+| VPC + EC2 instance | One public subnet, no NAT gateway. Amazon Linux 2023, `t3.small`, IMDSv2, no SSH key: connect with Session Manager. Docker, compose and cron installed on first boot. |
+| EBS data volume (`/data`) | gp3 20 GB, encrypted, mounted at `/data` on first boot. Kept when the instance or the stack is deleted. |
+| Security group | MLflow (5000) and Postgres (5432) open only to `adminCidr` and `workerCidr`. Nothing else inbound. |
+| SSM parameters | `/leaf-al/buckets/data`, `/leaf-al/buckets/models`, `/leaf-al/queues/jobs-url`. |
+| AWS Budget | Monthly cost budget, email at 80 % actual and 100 % forecast. Only created when `budgetEmail` is set. |
 
-## 2. Secrets in SSM Parameter Store
+Deploy-time settings are CDK context values (`-c key=value`):
 
-Never commit these. Use URL-safe characters for the Postgres password.
+| Key | Default | Meaning |
+| --- | --- | --- |
+| `adminCidr` | none (no inbound access) | Your IP as `/32` |
+| `workerCidr` | none | The GPU worker's IP, if it is not the same as `adminCidr` |
+| `budgetEmail` | none (no Budget) | Where Budget alerts go |
+| `budgetUsd` | `20` | Monthly budget in USD |
+| `instanceType` | `t3.small` | EC2 instance type (x86_64) |
+| `dataVolumeGb` | `20` | Size of the `/data` volume |
+
+## 1. Secrets in SSM Parameter Store (before the first deploy)
+
+CloudFormation cannot create SecureString parameters, so the Postgres password
+is yours to create. Never commit it. Use URL-safe characters (it goes into the
+MLflow backend URI):
 
 ```bash
 aws ssm put-parameter --name /leaf-al/postgres/password --type SecureString \
   --value "$(openssl rand -hex 24)"
 ```
 
-*(Phase 1)* after the stack is deployed, store the bucket names it prints:
+The stack writes the bucket names and queue URL to SSM itself.
 
-```bash
-aws ssm put-parameter --name /leaf-al/buckets/data   --type String --value <DataBucketName output>
-aws ssm put-parameter --name /leaf-al/buckets/models --type String --value <ModelsBucketName output>
-```
-
-## 3. CDK stack
+## 2. CDK stack
 
 ```bash
 uv sync --extra infra
 source .venv/bin/activate
 npx aws-cdk bootstrap "aws://$CDK_DEFAULT_ACCOUNT/$AWS_REGION"   # once per account/region
-npx aws-cdk diff                                                 # review what will change
-npx aws-cdk deploy LeafAlPlatform
+
+CTX="-c adminCidr=$MY_IP -c budgetEmail=<your-email> -c budgetUsd=20"
+npx aws-cdk diff   LeafAlPlatform $CTX                           # review what will change
+npx aws-cdk deploy LeafAlPlatform $CTX
 ```
 
-To remove everything later: `npx aws-cdk destroy LeafAlPlatform`.
+Use the same `-c` values on every deploy. A deploy without `adminCidr` closes
+MLflow and Postgres again; a deploy without `budgetEmail` deletes the Budget.
+If your home IP changes, re-run the deploy with the new `MY_IP`.
 
-## 4. Persistent data volume *(Phase 1)*
+If you already created a budget named `leaf-al-monthly` by hand (the earlier
+version of this doc did), delete it first, or the deploy fails on the name:
+`aws budgets delete-budget --account-id "$CDK_DEFAULT_ACCOUNT" --budget-name leaf-al-monthly`.
+
+AWS sends a confirmation email for the Budget alert subscription; confirm it.
+
+The deploy prints these outputs; you need them below:
+`DataBucketName`, `ModelsBucketName`, `JobQueueUrl`, `JobDlqUrl`,
+`WorkerUserName`, `InstanceId`, `DataVolumeId`.
+
+```bash
+aws cloudformation describe-stacks --stack-name LeafAlPlatform \
+  --query 'Stacks[0].Outputs' --output table
+```
+
+Before deploying a change, read the `diff`. If it says the `Host` instance
+will be **replaced**, stop and ask first: the data volume has to be detached
+from the old instance before the new one can attach it.
+
+### Removing the stack
+
+```bash
+npx aws-cdk destroy LeafAlPlatform
+```
+
+This deletes the instance, queues, IAM user and parameters, but **keeps** both
+buckets and the data volume, so no data is lost by accident. They keep costing
+storage until you delete them by hand (S3 console, or `aws s3 rb --force` and
+`aws ec2 delete-volume --volume-id <DataVolumeId>`). A later deploy creates a
+new, empty volume and new buckets; restore Postgres from a backup (section 5).
+
+## 3. EC2 services (Postgres + MLflow)
+
+Connect with Session Manager (install the
+[Session Manager plugin](https://docs.aws.amazon.com/systems-manager/latest/userguide/session-manager-working-with-install-plugin.html)
+for the AWS CLI once):
+
+```bash
+aws ssm start-session --target <InstanceId>
+```
+
+On the instance, check that first-boot setup finished and `/data` is mounted,
+then start the services:
+
+```bash
+sudo tail -n 20 /var/log/cloud-init-output.log
+df -h /data
+sudo su - ec2-user
+git clone https://github.com/duytq5/duytq5-leaf-al-platform.git && cd duytq5-leaf-al-platform/deploy/ec2
+AWS_REGION=<region> ./write-env.sh     # writes .env from SSM, mode 600
+docker compose up -d --build
+```
+
+The instance's public IP changes every time it starts (no Elastic IP, to save
+its hourly charge). Get the current one with:
+
+```bash
+aws ec2 describe-instances --instance-ids <InstanceId> \
+  --query 'Reservations[0].Instances[0].PublicIpAddress' --output text
+```
+
+MLflow is then at `http://<public-ip>:5000` from your IP.
+
+Stop the instance when not in use (the volume keeps all data):
+
+```bash
+aws ec2 stop-instances  --instance-ids <InstanceId>
+aws ec2 start-instances --instance-ids <InstanceId>
+```
+
+Postgres opens to the Lambdas (which run outside a VPC) only once it has TLS
+and a strong password, in the database schema PR.
+
+## 4. Worker credentials (on the RTX 5070 machine)
+
+The stack creates the worker's IAM user but not its access key, so the key
+never appears in CloudFormation. Create it and store it only on the GPU box:
+
+```bash
+aws iam create-access-key --user-name <WorkerUserName>
+# on the GPU machine:
+aws configure --profile leaf-al-worker     # paste the key id and secret, same region
+```
+
+To rotate: create a second key, switch the worker to it, then
+`aws iam delete-access-key --user-name <WorkerUserName> --access-key-id <old-id>`.
+
+If the worker runs from a different IP than you, add `-c workerCidr=<its-ip>/32`
+to the deploy so it can reach MLflow.
+
+## 5. Persistent data volume
 
 All Postgres data (metadata and the MLflow database, later Label Studio) lives
-on a separate EBS volume mounted at `/data`. It is not the instance's root
-disk, so it survives the instance being stopped, terminated or replaced.
-MLflow artifacts are already in S3. In Phase 1 the CDK stack will create this
-volume with `RemovalPolicy.RETAIN`; until then, create it by hand.
+on the separate EBS volume mounted at `/data`. MLflow artifacts are in S3.
+First boot formats the volume only if it has no filesystem yet, labels it
+`leaf-al-data`, and adds it to `/etc/fstab` with `nofail`, so stopping,
+starting and rebooting keep everything.
 
-The volume costs storage even when no instance is running (gp3 20 GB is about
-1.6 USD/month), so it counts toward the budget alongside EC2.
-
-### Create and attach (once)
-
-The volume must be in the same availability zone as the instance.
-
-```bash
-AZ=$(aws ec2 describe-instances --instance-ids <instance-id> \
-  --query 'Reservations[0].Instances[0].Placement.AvailabilityZone' --output text)
-VOL=$(aws ec2 create-volume --availability-zone "$AZ" --size 20 --volume-type gp3 \
-  --tag-specifications 'ResourceType=volume,Tags=[{Key=Name,Value=leaf-al-data}]' \
-  --query VolumeId --output text)
-aws ec2 wait volume-available --volume-ids "$VOL"
-aws ec2 attach-volume --volume-id "$VOL" --instance-id <instance-id> --device /dev/sdf
-echo "$VOL"   # keep this id; you need it to re-attach
-```
-
-A volume attached this way has DeleteOnTermination off, so terminating the
-instance leaves it alone. Check with:
-
-```bash
-aws ec2 describe-instances --instance-ids <instance-id> \
-  --query 'Reservations[0].Instances[0].BlockDeviceMappings[?DeviceName==`/dev/sdf`].Ebs.DeleteOnTermination'
-```
-
-### Format and mount (on the instance)
-
-On Nitro instances the volume shows up as `/dev/nvme1n1`; confirm with `lsblk`.
-**Only format a brand-new volume.** `sudo file -s /dev/nvme1n1` prints `data`
-when it is empty; if it prints a filesystem, skip `mkfs` or you erase everything.
-
-```bash
-lsblk
-sudo file -s /dev/nvme1n1
-sudo mkfs.ext4 -L leaf-al-data /dev/nvme1n1        # first time only
-sudo mkdir -p /data
-echo 'LABEL=leaf-al-data /data ext4 defaults,nofail 0 2' | sudo tee -a /etc/fstab
-sudo mount -a && df -h /data
-```
-
-`nofail` lets the instance boot even if the volume is missing.
-
-### Moving to a new instance
-
-```bash
-aws ec2 attach-volume --volume-id <vol-id> --instance-id <new-instance-id> --device /dev/sdf
-```
-
-Then on the new instance run the fstab and mount lines above (no `mkfs`), and
-start the services as in section 5. Postgres finds its existing data in
-`/data/postgres`.
+The volume costs storage even while the instance is stopped (gp3 20 GB is
+about 1.6 USD/month), so it counts toward the budget alongside EC2.
 
 ### Backups
 
 Snapshot the volume before risky changes:
 
 ```bash
-aws ec2 create-snapshot --volume-id <vol-id> --description "leaf-al before <change>"
+aws ec2 create-snapshot --volume-id <DataVolumeId> --description "leaf-al before <change>"
 ```
 
-And dump Postgres to S3 nightly from the instance (`crontab -e`):
+And dump Postgres to S3 nightly from the instance (`crontab -e` as `ec2-user`):
 
 ```
-0 3 * * * /home/ec2-user/<repo>/deploy/ec2/backup-postgres.sh >> /var/log/leaf-al-backup.log 2>&1
+0 3 * * * /home/ec2-user/duytq5-leaf-al-platform/deploy/ec2/backup-postgres.sh >> /home/ec2-user/leaf-al-backup.log 2>&1
 ```
 
-Restore a dump into a fresh, empty Postgres:
+Dumps are kept for 30 days. Restore one into a fresh, empty Postgres:
 
 ```bash
-aws s3 cp s3://<data-bucket>/backups/postgres/<file>.sql.gz - | gunzip \
+aws s3 cp s3://<DataBucketName>/backups/postgres/<file>.sql.gz - | gunzip \
   | docker compose exec -T postgres psql -U al -d postgres
 ```
 
-## 5. EC2 services (Postgres + MLflow) *(Phase 1)*
+## 6. Later in Phase 1
 
-On the instance, with `/data` mounted (section 4), Docker and the AWS CLI
-installed, and an instance role allowed to read `/leaf-al/*` in SSM, write the
-models bucket, and write `backups/` in the data bucket:
-
-```bash
-git clone <this repo> && cd <repo>/deploy/ec2
-AWS_REGION=<region> ./write-env.sh     # writes .env from SSM, mode 600
-docker compose up -d --build
-```
-
-Restrict the security group: 5432 and 5000 only from your IP (and the
-Lambdas' needs, decided in Phase 1). Stop the instance when not in use:
-
-```bash
-aws ec2 stop-instances --instance-ids <id>
-```
+The `al-round` state machine, the selection, oracle, snapshot and merge
+Lambdas, and Cognito are added to the same stack by later PRs; this file gets
+their steps as they land.
