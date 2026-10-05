@@ -7,7 +7,7 @@ only one inference pass over the pool.
 
 import numpy as np
 
-from selection.base import PoolData, Strategy, register
+from selection.base import LabeledStats, PoolData, Strategy, register
 
 
 def _require_probs(pool: PoolData) -> np.ndarray:
@@ -31,7 +31,7 @@ class LeastConfidence(Strategy):
     description = "Lowest top-1 probability first (1 - max p)."
     requires = frozenset({"probs"})
 
-    def select(self, pool: PoolData, labeled: PoolData, k: int) -> list[str]:
+    def select(self, pool: PoolData, labeled: LabeledStats, k: int) -> list[str]:
         probs = _require_probs(pool)
         return top_k(pool, 1.0 - probs.max(axis=1), k)
 
@@ -41,7 +41,7 @@ class Margin(Strategy):
     description = "Smallest gap between the top two class probabilities first."
     requires = frozenset({"probs"})
 
-    def select(self, pool: PoolData, labeled: PoolData, k: int) -> list[str]:
+    def select(self, pool: PoolData, labeled: LabeledStats, k: int) -> list[str]:
         probs = _require_probs(pool)
         top2 = np.sort(probs, axis=1)[:, -2:]
         return top_k(pool, -(top2[:, 1] - top2[:, 0]), k)
@@ -52,7 +52,7 @@ class Entropy(Strategy):
     description = "Highest predictive entropy first."
     requires = frozenset({"probs"})
 
-    def select(self, pool: PoolData, labeled: PoolData, k: int) -> list[str]:
+    def select(self, pool: PoolData, labeled: LabeledStats, k: int) -> list[str]:
         return top_k(pool, _entropy(_require_probs(pool)), k)
 
 
@@ -67,14 +67,11 @@ class ClassBalanced(Strategy):
     description = "Entropy x inverse labeled-class frequency: favours likely rare-class images."
     requires = frozenset({"probs"})
 
-    def select(self, pool: PoolData, labeled: PoolData, k: int) -> list[str]:
+    def select(self, pool: PoolData, labeled: LabeledStats, k: int) -> list[str]:
         probs = _require_probs(pool)
         num_classes = probs.shape[1]
-        if len(labeled) and labeled.labels is None:
-            raise ValueError("class_balanced needs labels for the labeled set")
-        labels = labeled.labels if len(labeled) else np.array([], dtype=int)
-        if labels.size and (labels.min() < 0 or labels.max() >= num_classes):
-            raise ValueError(f"labeled class indices must be in [0, {num_classes})")
-        counts = np.bincount(labels.astype(int), minlength=num_classes)
+        counts = labeled.class_counts
+        if counts.shape != (num_classes,):
+            raise ValueError(f"class_counts has {counts.shape[0]} classes, probs has {num_classes}")
         freq = (counts + 1) / (counts.sum() + num_classes)
         return top_k(pool, _entropy(probs) * (probs / freq).sum(axis=1), k)

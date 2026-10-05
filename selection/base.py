@@ -27,16 +27,11 @@ class StrategyParams(BaseModel):
 
 @dataclass(frozen=True)
 class PoolData:
-    """Images plus the score outputs for them, row-aligned with `ids`.
-
-    `labels` holds class indices (columns of `probs`, in the dataset's label
-    list order) and is set for the labeled set only.
-    """
+    """Unlabeled pool images plus their score outputs, row-aligned with `ids`."""
 
     ids: list[str]
     probs: np.ndarray | None = None  # (n, num_classes)
     embeddings: np.ndarray | None = None  # (n, dim)
-    labels: np.ndarray | None = None  # (n,) int class indices
 
     def __post_init__(self) -> None:
         n = len(self.ids)
@@ -44,11 +39,51 @@ class PoolData:
             arr = getattr(self, name)
             if arr is not None and (arr.ndim != 2 or arr.shape[0] != n):
                 raise ValueError(f"{name} must have shape ({n}, d), got {arr.shape}")
-        if self.labels is not None and self.labels.shape != (n,):
-            raise ValueError(f"labels must have shape ({n},), got {self.labels.shape}")
 
     def __len__(self) -> int:
         return len(self.ids)
+
+
+@dataclass(frozen=True)
+class LabeledStats:
+    """Aggregate statistics of the labeled set, not per-image data.
+
+    Loaded with one GROUP BY over the labels table (see LABELED_COUNTS_SQL), so
+    a round never pulls labeled-image metadata into memory.
+    """
+
+    class_counts: np.ndarray  # (num_classes,) labeled images per class, label-list order
+
+    def __post_init__(self) -> None:
+        if self.class_counts.ndim != 1 or (self.class_counts < 0).any():
+            raise ValueError("class_counts must be a 1-D array of non-negative counts")
+
+    @property
+    def total(self) -> int:
+        return int(self.class_counts.sum())
+
+    @classmethod
+    def empty(cls, num_classes: int) -> "LabeledStats":
+        return cls(class_counts=np.zeros(num_classes, dtype=np.int64))
+
+    @classmethod
+    def from_counts(cls, counts: dict[str, int], label_list: list[str]) -> "LabeledStats":
+        """Map `{label: count}` rows from SQL onto the dataset's label-list order."""
+        unknown = set(counts) - set(label_list)
+        if unknown:
+            raise ValueError(f"labels not in the dataset label list: {sorted(unknown)}")
+        return cls(class_counts=np.array([counts.get(y, 0) for y in label_list], dtype=np.int64))
+
+
+# Per-class labeled counts for one dataset's training split. Test-split images
+# never enter the pool, so they are excluded here too.
+LABELED_COUNTS_SQL = """
+SELECT l.label, count(DISTINCT l.image_id) AS n
+FROM labels l
+JOIN images i ON i.id = l.image_id
+WHERE i.dataset = %(dataset)s AND i.split = 'train'
+GROUP BY l.label
+"""
 
 
 class Strategy(ABC):
@@ -61,7 +96,7 @@ class Strategy(ABC):
         self.params = self.Params.model_validate(params or {})
 
     @abstractmethod
-    def select(self, pool: PoolData, labeled: PoolData, k: int) -> list[str]:
+    def select(self, pool: PoolData, labeled: LabeledStats, k: int) -> list[str]:
         """Return the ids of up to k images from `pool` to label next."""
 
 

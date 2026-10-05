@@ -1,6 +1,8 @@
 from selection import strategies  # noqa: F401  (registers built-in strategies)
 from selection.base import (
+    LABELED_COUNTS_SQL,
     STRATEGIES,
+    LabeledStats,
     PoolData,
     Strategy,
     StrategyParams,
@@ -12,7 +14,9 @@ from selection.base import (
 from selection.preview import SelectionPreview, preview_selection
 
 __all__ = [
+    "LABELED_COUNTS_SQL",
     "STRATEGIES",
+    "LabeledStats",
     "PoolData",
     "SelectionPreview",
     "Strategy",
