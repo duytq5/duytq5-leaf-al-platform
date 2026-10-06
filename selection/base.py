@@ -81,7 +81,8 @@ LABELED_COUNTS_SQL = """
 SELECT l.label, count(DISTINCT l.image_id) AS n
 FROM labels l
 JOIN images i ON i.id = l.image_id
-WHERE i.dataset = %(dataset)s AND i.split = 'train'
+JOIN datasets d ON d.id = i.dataset_id
+WHERE d.name = %(dataset)s AND i.split = 'train'
 GROUP BY l.label
 """
 

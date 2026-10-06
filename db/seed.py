@@ -168,8 +168,8 @@ def _record(conn: psycopg.Connection, cfg: DatasetConfig, images, splits, report
             "INSERT INTO datasets (name, labels) VALUES (%s, %s) ON CONFLICT (name) DO NOTHING",
             (cfg.name, cfg.labels),
         )
-        (stored,) = conn.execute(
-            "SELECT labels FROM datasets WHERE name = %s", (cfg.name,)
+        dataset_id, stored = conn.execute(
+            "SELECT id, labels FROM datasets WHERE name = %s", (cfg.name,)
         ).fetchone()
         if stored != cfg.labels:
             raise SeedError(
@@ -178,15 +178,15 @@ def _record(conn: psycopg.Connection, cfg: DatasetConfig, images, splits, report
             )
 
         before = conn.execute(
-            "SELECT count(*) FROM images WHERE dataset = %s", (cfg.name,)
+            "SELECT count(*) FROM images WHERE dataset_id = %s", (dataset_id,)
         ).fetchone()[0]
         with conn.cursor() as cur:
             cur.executemany(
-                "INSERT INTO images (dataset, sha256, s3_key, status, split, source)"
-                " VALUES (%s, %s, %s, %s, %s, %s) ON CONFLICT (dataset, sha256) DO NOTHING",
+                "INSERT INTO images (dataset_id, sha256, s3_key, status, split, source)"
+                " VALUES (%s, %s, %s, %s, %s, %s) ON CONFLICT (dataset_id, sha256) DO NOTHING",
                 [
                     (
-                        cfg.name,
+                        dataset_id,
                         img.sha256,
                         raw_key(cfg.name, img.sha256),
                         ImageStatus.UNLABELED
@@ -201,7 +201,7 @@ def _record(conn: psycopg.Connection, cfg: DatasetConfig, images, splits, report
         rows = {
             sha: (image_id, Split(split))
             for sha, image_id, split in conn.execute(
-                "SELECT sha256, id, split FROM images WHERE dataset = %s", (cfg.name,)
+                "SELECT sha256, id, split FROM images WHERE dataset_id = %s", (dataset_id,)
             )
         }
         report.new_rows = len(rows) - before
@@ -211,8 +211,8 @@ def _record(conn: psycopg.Connection, cfg: DatasetConfig, images, splits, report
             image_id: label
             for image_id, label in conn.execute(
                 "SELECT o.image_id, o.label FROM oracle_labels o"
-                " JOIN images i ON i.id = o.image_id WHERE i.dataset = %s",
-                (cfg.name,),
+                " JOIN images i ON i.id = o.image_id WHERE i.dataset_id = %s",
+                (dataset_id,),
             )
         }
         conflicts = [

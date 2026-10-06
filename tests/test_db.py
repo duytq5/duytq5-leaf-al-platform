@@ -120,8 +120,8 @@ def _image(conn, split: str, status: str, sha: str = "0" * 64) -> None:
         "INSERT INTO datasets (name, labels) VALUES ('toy', '{a,b}') ON CONFLICT DO NOTHING"
     )
     conn.execute(
-        "INSERT INTO images (dataset, sha256, s3_key, status, split, source)"
-        " VALUES ('toy', %s, 'k', %s, %s, 'seed')",
+        "INSERT INTO images (dataset_id, sha256, s3_key, status, split, source)"
+        " SELECT id, %s, 'k', %s, %s, 'seed' FROM datasets WHERE name = 'toy'",
         (sha, status, split),
     )
 
@@ -139,8 +139,9 @@ def test_eval_images_can_never_enter_the_pool(conn, split, status):
 def _round(conn, status: str = "pending") -> uuid.UUID:
     rid = uuid.uuid4()
     conn.execute(
-        "INSERT INTO rounds (id, dataset, mode, strategy, k, seed, status, started_by)"
-        " VALUES (%s, 'toy', 'simulation', 'random', 10, 42, %s, 'owner')",
+        "INSERT INTO rounds (id, dataset_id, mode, strategy, k, seed, status, started_by)"
+        " SELECT %s, id, 'simulation', 'random', 10, 42, %s, 'owner' FROM datasets"
+        " WHERE name = 'toy'",
         (rid, status),
     )
     return rid
@@ -168,3 +169,39 @@ def test_label_insert_is_retry_safe(conn):
         conn.execute(sql, (image_id, None))
     assert conn.execute("SELECT count(*) FROM labels").fetchone() == (2,)
     assert conn.execute(LABELED_COUNTS_SQL, {"dataset": "toy"}).fetchall() == [("a", 1)]
+
+
+def test_every_table_has_an_id_primary_key(conn):
+    rows = conn.execute(
+        "SELECT tc.table_name, string_agg(kcu.column_name, ',')"
+        " FROM information_schema.table_constraints tc"
+        " JOIN information_schema.key_column_usage kcu"
+        "   ON kcu.constraint_name = tc.constraint_name AND kcu.table_schema = tc.table_schema"
+        " WHERE tc.constraint_type = 'PRIMARY KEY' AND tc.table_schema = 'public'"
+        "   AND tc.table_name <> 'schema_migrations'"
+        " GROUP BY tc.table_name"
+    ).fetchall()
+    assert dict(rows) == {
+        t: "id" for t in ("datasets", "images", "rounds", "labels", "oracle_labels", "captures")
+    }
+
+
+def test_natural_keys_stay_unique(conn):
+    _image(conn, "train", "unlabeled")
+    with pytest.raises(psycopg.errors.UniqueViolation):
+        conn.execute("INSERT INTO datasets (name, labels) VALUES ('toy', '{a,b}')")
+    (image_id,) = conn.execute("SELECT id FROM images").fetchone()
+    conn.execute("INSERT INTO oracle_labels (image_id, label) VALUES (%s, 'a')", (image_id,))
+    with pytest.raises(psycopg.errors.UniqueViolation):
+        conn.execute("INSERT INTO oracle_labels (image_id, label) VALUES (%s, 'b')", (image_id,))
+    capture = (
+        "INSERT INTO captures (capture_id, dataset_id, sha256, device_id, model_version, top1,"
+        " confidence, probs, captured_at)"
+        " SELECT %s, id, %s, 'dev', 'leaf-disease/1', 'a', 0.6, '{\"a\": 0.6, \"b\": 0.4}', now()"
+        " FROM datasets WHERE name = 'toy'"
+        " ON CONFLICT (capture_id) DO NOTHING"
+    )
+    cid = uuid.uuid4()
+    for _ in range(2):
+        conn.execute(capture, (cid, "1" * 64))
+    assert conn.execute("SELECT count(*) FROM captures").fetchone() == (1,)
