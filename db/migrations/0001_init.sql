@@ -162,9 +162,13 @@ CREATE TABLE model_versions (
     mlflow_run_id          text NOT NULL,
     arch                   text NOT NULL,
     train_config           jsonb NOT NULL,
-    -- Class codes in output order, copied from `classes` when the model was
-    -- trained, so the manifest stays right even if classes change later.
-    labels                 text[] NOT NULL CHECK (cardinality(labels) >= 2),
+    -- Class snapshot frozen when training starts and never updated:
+    -- [{"code": ..., "display_name": ...}, ...] in model output order. The same
+    -- JSON goes into the exported manifest.json, so the app shows the names the
+    -- model was trained with even if `classes` changes later.
+    labels                 jsonb NOT NULL CHECK (
+        jsonb_typeof(labels) = 'array' AND jsonb_array_length(labels) >= 2
+    ),
     metrics                jsonb,
     onnx_s3_key            text,
     onnx_sha256            text CHECK (onnx_sha256 ~ '^[0-9a-f]{64}$'),

@@ -7,12 +7,12 @@ order of the list is the model's output order.
 """
 
 from pathlib import Path
-from typing import Annotated, Self
+from typing import Self
 
 import yaml
-from pydantic import BaseModel, ConfigDict, Field, StringConstraints, model_validator
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from common.types import DatasetName
+from common.types import ClassCode, DatasetName
 
 
 class SplitConfig(BaseModel):
@@ -27,9 +27,6 @@ class SplitConfig(BaseModel):
         if self.val + self.test >= 1.0:
             raise ValueError("val + test must leave some images for train")
         return self
-
-
-ClassCode = Annotated[str, StringConstraints(pattern=r"^[a-z0-9][a-z0-9_]*$", max_length=64)]
 
 
 class ClassConfig(BaseModel):

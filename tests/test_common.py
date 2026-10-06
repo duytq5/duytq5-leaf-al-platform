@@ -171,7 +171,11 @@ def _manifest() -> dict:
             "mean": [0.485, 0.456, 0.406],
             "std": [0.229, 0.224, 0.225],
         },
-        "labels": ["healthy", "leaf_blight", "algal_spot"],
+        "labels": [
+            {"code": "healthy", "display_name": "Healthy"},
+            {"code": "leaf_blight", "display_name": "Cháy lá"},
+            {"code": "algal_spot", "display_name": "Algal spot"},
+        ],
     }
 
 
@@ -180,9 +184,12 @@ def test_manifest_from_doc_example():
     assert m.preprocess.input_size == (256, 256)
 
 
-def test_manifest_rejects_duplicate_labels():
+def test_manifest_rejects_duplicate_class_codes():
     m = _manifest()
-    m["labels"] = ["healthy", "healthy"]
+    m["labels"] = [
+        {"code": "healthy", "display_name": "A"},
+        {"code": "healthy", "display_name": "B"},
+    ]
     with pytest.raises(ValidationError):
         ModelManifest.model_validate(m)
 

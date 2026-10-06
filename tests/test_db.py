@@ -5,6 +5,7 @@ from pathlib import Path
 
 import psycopg
 import pytest
+from psycopg.types.json import Jsonb
 
 from common.dataset import DatasetConfig
 from db import connect
@@ -12,6 +13,8 @@ from db.migrate import migrate, migration_files
 from db.seed import SeedError, seed_dataset
 from selection.base import LABELED_COUNTS_SQL
 from tests.test_seed import make_folder
+
+SNAPSHOT = [{"code": "a", "display_name": "Class A"}, {"code": "b", "display_name": "Class B"}]
 
 # The 'a' class of the toy dataset, for raw SQL in tests.
 CLASS_A = (
@@ -416,9 +419,9 @@ def _model(conn, round_id, mlflow_version: int = 1) -> int:
     return conn.execute(
         "INSERT INTO model_versions (round_id, trained_on_version_id, mlflow_name,"
         " mlflow_version, mlflow_run_id, arch, train_config, labels)"
-        " SELECT id, base_version_id, 'leaf-disease', %s, 'run', 'fastvit_t8', '{}', '{a,b}'"
+        " SELECT id, base_version_id, 'leaf-disease', %s, 'run', 'fastvit_t8', '{}', %s"
         " FROM rounds WHERE id = %s RETURNING id",
-        (mlflow_version, round_id),
+        (mlflow_version, Jsonb(SNAPSHOT), round_id),
     ).fetchone()[0]
 
 
@@ -461,3 +464,16 @@ def test_latest_release_is_the_champion_and_releases_are_append_only(conn):
     for sql in ("UPDATE model_releases SET action = 'promote'", "DELETE FROM model_releases"):
         with pytest.raises(psycopg.errors.RaiseException, match="append-only"):
             conn.execute(sql)
+
+
+def test_model_class_snapshot_is_a_json_array(conn):
+    _image(conn, "train", "unlabeled")
+    model = _model(conn, _round(conn))
+    assert conn.execute("SELECT labels FROM model_versions WHERE id = %s", (model,)).fetchone() == (
+        SNAPSHOT,
+    )
+    with pytest.raises(psycopg.errors.CheckViolation):
+        conn.execute(
+            "UPDATE model_versions SET labels = %s WHERE id = %s",
+            (Jsonb({"code": "a"}), model),
+        )
