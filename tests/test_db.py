@@ -210,6 +210,8 @@ def test_every_table_has_an_id_primary_key(conn):
             "oracle_labels",
             "dataset_versions",
             "dataset_version_labels",
+            "model_versions",
+            "model_releases",
             "captures",
         )
     }
@@ -223,16 +225,17 @@ def test_natural_keys_stay_unique(conn):
     conn.execute("INSERT INTO oracle_labels (image_id, label) VALUES (%s, 'a')", (image_id,))
     with pytest.raises(psycopg.errors.UniqueViolation):
         conn.execute("INSERT INTO oracle_labels (image_id, label) VALUES (%s, 'b')", (image_id,))
+    model = _model(conn, _round(conn))
     capture = (
-        "INSERT INTO captures (capture_id, dataset_id, sha256, device_id, model_version, top1,"
+        "INSERT INTO captures (capture_id, dataset_id, sha256, device_id, model_version_id, top1,"
         " confidence, probs, captured_at)"
-        " SELECT %s, id, %s, 'dev', 'leaf-disease/1', 'a', 0.6, '{\"a\": 0.6, \"b\": 0.4}', now()"
+        " SELECT %s, id, %s, 'dev', %s, 'a', 0.6, '{\"a\": 0.6, \"b\": 0.4}', now()"
         " FROM datasets WHERE name = 'toy'"
         " ON CONFLICT (capture_id) DO NOTHING"
     )
     cid = uuid.uuid4()
     for _ in range(2):
-        conn.execute(capture, (cid, "1" * 64))
+        conn.execute(capture, (cid, "1" * 64, model))
     assert conn.execute("SELECT count(*) FROM captures").fetchone() == (1,)
 
 
@@ -372,3 +375,54 @@ def test_seed_refuses_to_change_v0_once_a_round_used_it(conn, tmp_path):
     make_folder(tmp_path, {"a": 10}, start=20)
     with pytest.raises(SeedError, match="trained on v0"):
         seed_dataset(conn, CFG, tmp_path, FakeStore())
+
+
+def _model(conn, round_id, mlflow_version: int = 1) -> int:
+    return conn.execute(
+        "INSERT INTO model_versions (round_id, trained_on_version_id, mlflow_name,"
+        " mlflow_version, mlflow_run_id, arch, train_config, labels)"
+        " SELECT id, base_version_id, 'leaf-disease', %s, 'run', 'fastvit_t8', '{}', '{a,b}'"
+        " FROM rounds WHERE id = %s RETURNING id",
+        (mlflow_version, round_id),
+    ).fetchone()[0]
+
+
+def test_one_model_per_round_and_export_columns_together(conn):
+    _image(conn, "train", "unlabeled")
+    rid = _round(conn)
+    model = _model(conn, rid)
+    with pytest.raises(psycopg.errors.UniqueViolation):
+        _model(conn, rid, mlflow_version=2)
+    with pytest.raises(psycopg.errors.CheckViolation):
+        conn.execute("UPDATE model_versions SET onnx_s3_key = 'k' WHERE id = %s", (model,))
+    conn.execute(
+        "UPDATE model_versions SET onnx_s3_key = 'edge/leaf-disease/1/model.onnx',"
+        " onnx_sha256 = %s, size_bytes = 100, exported_at = now() WHERE id = %s",
+        ("2" * 64, model),
+    )
+
+
+def test_latest_release_is_the_champion_and_releases_are_append_only(conn):
+    _image(conn, "train", "unlabeled")
+    first = _round(conn)
+    conn.execute("UPDATE rounds SET status = 'succeeded' WHERE id = %s", (first,))
+    m1 = _model(conn, first, 1)
+    m2 = _model(conn, _round(conn), 2)
+    release = (
+        "INSERT INTO model_releases (model_version_id, action, released_by)"
+        " VALUES (%s, %s, 'owner')"
+    )
+    conn.execute(release, (m1, "promote"))
+    conn.execute(release, (m2, "promote"))
+    conn.execute(release, (m1, "rollback"))
+    champion = conn.execute(
+        "SELECT r.model_version_id FROM model_releases r"
+        " JOIN model_versions m ON m.id = r.model_version_id"
+        " JOIN rounds ro ON ro.id = m.round_id"
+        " JOIN datasets d ON d.id = ro.dataset_id"
+        " WHERE d.name = 'toy' ORDER BY r.released_at DESC, r.id DESC LIMIT 1"
+    ).fetchone()
+    assert champion == (m1,)
+    for sql in ("UPDATE model_releases SET action = 'promote'", "DELETE FROM model_releases"):
+        with pytest.raises(psycopg.errors.RaiseException, match="append-only"):
+            conn.execute(sql)
