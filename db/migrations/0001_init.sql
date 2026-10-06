@@ -1,4 +1,4 @@
--- Metadata for the AL loop: datasets, images, labels, rounds, dataset
+-- Metadata for the AL loop: datasets and their classes, images, labels, rounds, dataset
 -- versions, models and their releases, the simulation oracle's ground truth,
 -- and edge captures.
 -- Applied once by `al db migrate`.
@@ -8,13 +8,26 @@
 -- `id` is a bigint identity, except rounds.id: a uuid, because it is also
 -- the Step Functions execution name.
 
--- One label list per dataset. Its order is the model's output order and is
--- copied into the model manifest.
 CREATE TABLE datasets (
     id          bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
     name        text NOT NULL UNIQUE CHECK (name ~ '^[a-z0-9][a-z0-9_-]*$'),
-    labels      text[] NOT NULL CHECK (cardinality(labels) >= 2),
     created_at  timestamptz NOT NULL DEFAULT now()
+);
+
+-- One class list per dataset. `code` is the machine name used by code, the
+-- model, the manifest and API payloads; `display_name` is what users and
+-- labelers read. Codes ordered by `position` (the model output index) are the
+-- class list copied into the model manifest.
+CREATE TABLE classes (
+    id            bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    dataset_id    bigint NOT NULL REFERENCES datasets (id),
+    code          text NOT NULL CHECK (code ~ '^[a-z0-9][a-z0-9_]*$'),
+    position      integer NOT NULL CHECK (position >= 0),
+    display_name  text NOT NULL,
+    description   text,
+    created_at    timestamptz NOT NULL DEFAULT now(),
+    UNIQUE (dataset_id, code),
+    UNIQUE (dataset_id, position)
 );
 
 CREATE TABLE images (
@@ -92,7 +105,7 @@ CREATE TABLE labels (
     id          bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
     image_id    bigint NOT NULL REFERENCES images (id),
     round_id    uuid REFERENCES rounds (id),
-    label       text NOT NULL,
+    class_id    bigint NOT NULL REFERENCES classes (id),
     source      text NOT NULL CHECK (source IN ('expert', 'oracle', 'seed')),
     labeled_by  text,
     created_at  timestamptz NOT NULL DEFAULT now(),
@@ -133,7 +146,7 @@ CREATE TABLE dataset_version_labels (
 CREATE TABLE oracle_labels (
     id          bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
     image_id    bigint NOT NULL UNIQUE REFERENCES images (id),
-    label       text NOT NULL
+    class_id    bigint NOT NULL REFERENCES classes (id)
 );
 
 -- One model per round: a thin index over MLflow, which keeps the artifacts and
@@ -149,7 +162,9 @@ CREATE TABLE model_versions (
     mlflow_run_id          text NOT NULL,
     arch                   text NOT NULL,
     train_config           jsonb NOT NULL,
-    labels                 text[] NOT NULL CHECK (cardinality(labels) >= 2),  -- output order
+    -- Class codes in output order, copied from `classes` when the model was
+    -- trained, so the manifest stays right even if classes change later.
+    labels                 text[] NOT NULL CHECK (cardinality(labels) >= 2),
     metrics                jsonb,
     onnx_s3_key            text,
     onnx_sha256            text CHECK (onnx_sha256 ~ '^[0-9a-f]{64}$'),
@@ -190,9 +205,9 @@ CREATE TABLE captures (
     sha256         text NOT NULL CHECK (sha256 ~ '^[0-9a-f]{64}$'),
     device_id      text NOT NULL,  -- from the Cognito JWT, never from the request body
     model_version_id bigint NOT NULL REFERENCES model_versions (id),  -- the on-device model
-    top1           text NOT NULL,
+    top1_class_id  bigint NOT NULL REFERENCES classes (id),
     confidence     real NOT NULL CHECK (confidence BETWEEN 0 AND 1),
-    probs          jsonb NOT NULL,
+    probs          jsonb NOT NULL,  -- keyed by class code
     captured_at    timestamptz NOT NULL,
     created_at     timestamptz NOT NULL DEFAULT now()
 );

@@ -13,7 +13,17 @@ from db.seed import SeedError, seed_dataset
 from selection.base import LABELED_COUNTS_SQL
 from tests.test_seed import make_folder
 
-CFG = DatasetConfig(name="toy", labels=["a", "b"], split={"val": 0.2, "test": 0.2, "seed": 3})
+# The 'a' class of the toy dataset, for raw SQL in tests.
+CLASS_A = (
+    "(SELECT c.id FROM classes c JOIN datasets d ON d.id = c.dataset_id"
+    " WHERE d.name = 'toy' AND c.code = 'a')"
+)
+
+CFG = DatasetConfig(
+    name="toy",
+    classes=[{"code": "a", "display_name": "Class A"}, {"code": "b", "display_name": "Class B"}],
+    split={"val": 0.2, "test": 0.2, "seed": 3},
+)
 
 
 class FakeStore:
@@ -78,7 +88,9 @@ def test_seed_end_to_end(conn, tmp_path):
         "SELECT count(*) FROM dataset_version_labels WHERE version_id = %s", (v0,)
     ).fetchone() == (12,)
     assert conn.execute(LABELED_COUNTS_SQL, {"version_id": v0}).fetchall() == []
-    assert conn.execute("SELECT labels FROM datasets").fetchone() == (["a", "b"],)
+    assert conn.execute(
+        "SELECT code, position, display_name FROM classes ORDER BY position"
+    ).fetchall() == [("a", 0, "Class A"), ("b", 1, "Class B")]
 
 
 def test_seed_rerun_is_a_noop(conn, tmp_path):
@@ -109,7 +121,7 @@ def test_seed_keeps_first_split_when_images_are_added(conn, tmp_path):
 
 def test_seed_refuses_a_changed_label_list(conn, tmp_path):
     seed_dataset(conn, CFG, make_folder(tmp_path, {"a": 5, "b": 5}), FakeStore())
-    reordered = CFG.model_copy(update={"labels": ["b", "a"]})
+    reordered = CFG.model_copy(update={"classes": list(reversed(CFG.classes))})
     with pytest.raises(SeedError, match="cannot change"):
         seed_dataset(conn, reordered, tmp_path, FakeStore())
 
@@ -124,8 +136,12 @@ def test_seed_refuses_a_changed_ground_truth(conn, tmp_path):
 
 
 def _image(conn, split: str, status: str, sha: str = "0" * 64) -> None:
+    conn.execute("INSERT INTO datasets (name) VALUES ('toy') ON CONFLICT DO NOTHING")
     conn.execute(
-        "INSERT INTO datasets (name, labels) VALUES ('toy', '{a,b}') ON CONFLICT DO NOTHING"
+        "INSERT INTO classes (dataset_id, code, position, display_name)"
+        " SELECT d.id, c.code, c.pos, upper(c.code) FROM datasets d,"
+        " (VALUES ('a', 0), ('b', 1)) AS c (code, pos) WHERE d.name = 'toy'"
+        " ON CONFLICT DO NOTHING"
     )
     conn.execute(
         "INSERT INTO images (dataset_id, sha256, s3_key, status, split, source)"
@@ -181,7 +197,8 @@ def test_label_insert_is_retry_safe(conn):
     (image_id,) = conn.execute("SELECT id FROM images").fetchone()
     rid = _round(conn)
     sql = (
-        "INSERT INTO labels (image_id, label, round_id, source) VALUES (%s, 'a', %s, %s)"
+        "INSERT INTO labels (image_id, class_id, round_id, source)"
+        f" VALUES (%s, {CLASS_A}, %s, %s)"
         " ON CONFLICT (image_id, round_id) DO NOTHING"
     )
     for _ in range(2):
@@ -204,6 +221,7 @@ def test_every_table_has_an_id_primary_key(conn):
         t: "id"
         for t in (
             "datasets",
+            "classes",
             "images",
             "rounds",
             "labels",
@@ -220,16 +238,28 @@ def test_every_table_has_an_id_primary_key(conn):
 def test_natural_keys_stay_unique(conn):
     _image(conn, "train", "unlabeled")
     with pytest.raises(psycopg.errors.UniqueViolation):
-        conn.execute("INSERT INTO datasets (name, labels) VALUES ('toy', '{a,b}')")
-    (image_id,) = conn.execute("SELECT id FROM images").fetchone()
-    conn.execute("INSERT INTO oracle_labels (image_id, label) VALUES (%s, 'a')", (image_id,))
+        conn.execute("INSERT INTO datasets (name) VALUES ('toy')")
     with pytest.raises(psycopg.errors.UniqueViolation):
-        conn.execute("INSERT INTO oracle_labels (image_id, label) VALUES (%s, 'b')", (image_id,))
+        conn.execute(
+            "INSERT INTO classes (dataset_id, code, position, display_name)"
+            " SELECT id, 'a', 5, 'dup' FROM datasets WHERE name = 'toy'"
+        )
+    with pytest.raises(psycopg.errors.UniqueViolation):
+        conn.execute(
+            "INSERT INTO classes (dataset_id, code, position, display_name)"
+            " SELECT id, 'c', 0, 'same position' FROM datasets WHERE name = 'toy'"
+        )
+    (image_id,) = conn.execute("SELECT id FROM images").fetchone()
+    oracle = f"INSERT INTO oracle_labels (image_id, class_id) VALUES (%s, {CLASS_A})"
+    conn.execute(oracle, (image_id,))
+    with pytest.raises(psycopg.errors.UniqueViolation):
+        conn.execute(oracle, (image_id,))
     model = _model(conn, _round(conn))
     capture = (
-        "INSERT INTO captures (capture_id, dataset_id, sha256, device_id, model_version_id, top1,"
-        " confidence, probs, captured_at)"
-        " SELECT %s, id, %s, 'dev', %s, 'a', 0.6, '{\"a\": 0.6, \"b\": 0.4}', now()"
+        "INSERT INTO captures (capture_id, dataset_id, sha256, device_id, model_version_id,"
+        " top1_class_id, confidence, probs, captured_at)"
+        f" SELECT %s, id, %s, 'dev', %s, {CLASS_A}, 0.6,"
+        """ '{"a": 0.6, "b": 0.4}', now()"""
         " FROM datasets WHERE name = 'toy'"
         " ON CONFLICT (capture_id) DO NOTHING"
     )
@@ -257,8 +287,8 @@ def test_label_source_rules(conn, source, with_round, labeled_by, ok):
     (image_id,) = conn.execute("SELECT id FROM images").fetchone()
     rid = _round(conn) if with_round else None
     insert = lambda: conn.execute(  # noqa: E731
-        "INSERT INTO labels (image_id, label, round_id, source, labeled_by)"
-        " VALUES (%s, 'a', %s, %s, %s)",
+        "INSERT INTO labels (image_id, class_id, round_id, source, labeled_by)"
+        f" VALUES (%s, {CLASS_A}, %s, %s, %s)",
         (image_id, rid, source, labeled_by),
     )
     if ok:
@@ -268,11 +298,12 @@ def test_label_source_rules(conn, source, with_round, labeled_by, ok):
             insert()
 
 
-def _label(conn, image_id: int, label: str, round_id) -> int:
+def _label(conn, image_id: int, code: str, round_id) -> int:
     return conn.execute(
-        "INSERT INTO labels (image_id, label, round_id, source) VALUES (%s, %s, %s, 'oracle')"
-        " RETURNING id",
-        (image_id, label, round_id),
+        "INSERT INTO labels (image_id, class_id, round_id, source)"
+        " SELECT %s, c.id, %s, 'oracle' FROM classes c JOIN datasets d ON d.id = c.dataset_id"
+        " WHERE d.name = 'toy' AND c.code = %s RETURNING id",
+        (image_id, round_id, code),
     ).fetchone()[0]
 
 
@@ -342,7 +373,11 @@ def test_labels_are_append_only(conn):
     _image(conn, "train", "unlabeled")
     (image_id,) = conn.execute("SELECT id FROM images").fetchone()
     _label(conn, image_id, "a", _round(conn))
-    for sql in ("UPDATE labels SET label = 'b'", "DELETE FROM labels", "TRUNCATE labels CASCADE"):
+    for sql in (
+        "UPDATE labels SET labeled_by = 'x'",
+        "DELETE FROM labels",
+        "TRUNCATE labels CASCADE",
+    ):
         with pytest.raises(psycopg.errors.RaiseException, match="append-only"):
             conn.execute(sql)
 

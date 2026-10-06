@@ -187,7 +187,7 @@ export DATA_BUCKET=$(aws ssm get-parameter --name /leaf-al/buckets/data \
 ```
 
 Create the tables, then seed each dataset. `<image-dir>` has one sub-folder of
-JPEGs per label, named as in the dataset config. Check the split with
+JPEGs per class, named by the class code in the dataset config. Check the split with
 `--dry-run` first; both commands are safe to re-run if they stop half-way.
 
 ```bash

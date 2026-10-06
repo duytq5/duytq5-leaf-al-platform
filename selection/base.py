@@ -79,12 +79,13 @@ class LabeledStats:
 # training split counts: val and test labels are in every version but never
 # in the pool.
 LABELED_COUNTS_SQL = """
-SELECT l.label, count(*) AS n
+SELECT c.code AS label, count(*) AS n
 FROM dataset_version_labels v
 JOIN labels l ON l.id = v.label_id
+JOIN classes c ON c.id = l.class_id
 JOIN images i ON i.id = v.image_id
 WHERE v.version_id = %(version_id)s AND i.split = 'train'
-GROUP BY l.label
+GROUP BY c.code
 """
 
 

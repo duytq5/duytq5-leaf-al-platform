@@ -17,7 +17,7 @@ uploads images and downloads ONNX models.
 | `infra/` | AWS CDK app (Python), one stack: `LeafAlPlatform` |
 | `deploy/ec2/` | Docker Compose for the single EC2 instance: Postgres + MLflow |
 | `cli/` | Operator CLI `al` |
-| `configs/datasets/` | YAML dataset configs: the label list and the fixed train/val/test split |
+| `configs/datasets/` | YAML dataset configs: the class list (code + display name) and the fixed train/val/test split |
 | `configs/train/` | YAML training configs |
 | `configs/rounds/` | YAML round configs: strategy, its parameters and k, chosen by a human per round |
 | `tests/` | Unit tests |
@@ -66,7 +66,7 @@ uv run al seed configs/datasets/rocole.yaml <image-dir> --dry-run   # show the s
 uv run al seed configs/datasets/rocole.yaml <image-dir> --bucket <data-bucket>
 ```
 
-`<image-dir>` has one sub-folder of JPEGs per label, named as in the dataset
+`<image-dir>` has one sub-folder of JPEGs per class, named by the class code in the dataset
 config. The seed uploads each image to `raw/<dataset>/<sha256>.jpg`, then records
 it with a split that is stratified per class and fixed by the split seed.
 Re-running it skips what is already there, and an image keeps its first split.
@@ -110,7 +110,7 @@ confidence) and `al round start`.
 - POC scope: no services or features beyond the design doc without the owner's say.
 - Jobs and Lambdas are retry-safe (SQS can deliver twice; the app retries uploads).
 - Test-split images never enter the AL pool or Label Studio.
-- One label list per dataset; its order is the model's output order and is copied into the manifest.
+- One class list per dataset (machine `code` + readable `display_name`); the order of the codes is the model's output order and is copied into the manifest.
 - Buckets are private, uploads land in `incoming/` first, secrets live in SSM Parameter Store and are never committed.
 - Cost: the EC2 instance is the only always-on resource; stop it when idle. Lambdas run outside a VPC (no NAT gateway).
 

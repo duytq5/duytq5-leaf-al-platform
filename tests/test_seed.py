@@ -23,6 +23,20 @@ def test_example_dataset_config_loads():
     cfg = DatasetConfig.from_yaml(ROOT / "configs/datasets/rocole.yaml")
     assert cfg.name == "rocole"
     assert cfg.split.test > 0
+    assert cfg.codes == ["healthy", "red_spider_mite", "rust"]
+    assert all(c.display_name for c in cfg.classes)
+
+
+def test_class_codes_are_machine_names():
+    with pytest.raises(ValueError):
+        DatasetConfig(
+            name="x",
+            classes=[
+                {"code": "Leaf Blight", "display_name": "A"},
+                {"code": "b", "display_name": "B"},
+            ],
+            split={"val": 0.1, "test": 0.1},
+        )
 
 
 @pytest.mark.parametrize(
@@ -33,9 +47,13 @@ def test_split_config_rejects(split):
         SplitConfig(**split)
 
 
-def test_dataset_config_rejects_duplicate_labels():
+def test_dataset_config_rejects_duplicate_codes():
     with pytest.raises(ValueError, match="unique"):
-        DatasetConfig(name="x", labels=["a", "a"], split={"val": 0.1, "test": 0.1})
+        DatasetConfig(
+            name="x",
+            classes=[{"code": "a", "display_name": "A"}, {"code": "a", "display_name": "B"}],
+            split={"val": 0.1, "test": 0.1},
+        )
 
 
 def test_scan_reads_folders_and_dedupes(tmp_path):

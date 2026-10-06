@@ -1,14 +1,16 @@
-"""Per-dataset settings: the one label list and the fixed train/val/test split.
+"""Per-dataset settings: the one class list and the fixed train/val/test split.
 
-configs/datasets/<name>.yaml is read by the seed script. The label list is
-stored on the `datasets` row and its order is the model's output order.
+configs/datasets/<name>.yaml is read by the seed script, which stores the
+classes in the `classes` table. A class has a machine `code` (used by code,
+the model, the manifest and API payloads) and a readable `display_name`. The
+order of the list is the model's output order.
 """
 
 from pathlib import Path
-from typing import Self
+from typing import Annotated, Self
 
 import yaml
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, StringConstraints, model_validator
 
 from common.types import DatasetName
 
@@ -27,18 +29,33 @@ class SplitConfig(BaseModel):
         return self
 
 
+ClassCode = Annotated[str, StringConstraints(pattern=r"^[a-z0-9][a-z0-9_]*$", max_length=64)]
+
+
+class ClassConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    code: ClassCode
+    display_name: str = Field(min_length=1)
+    description: str | None = None
+
+
 class DatasetConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     name: DatasetName
-    labels: list[str] = Field(min_length=2)
+    classes: list[ClassConfig] = Field(min_length=2)  # in model output order
     split: SplitConfig
 
     @model_validator(mode="after")
-    def _unique_labels(self) -> Self:
-        if len(set(self.labels)) != len(self.labels):
-            raise ValueError("labels must be unique")
+    def _unique_codes(self) -> Self:
+        if len(set(self.codes)) != len(self.codes):
+            raise ValueError("class codes must be unique")
         return self
+
+    @property
+    def codes(self) -> list[str]:
+        return [c.code for c in self.classes]
 
     @classmethod
     def from_yaml(cls, path: str | Path) -> "DatasetConfig":

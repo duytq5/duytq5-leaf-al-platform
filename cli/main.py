@@ -65,7 +65,7 @@ def cmd_seed(args: argparse.Namespace) -> int:
         cfg = DatasetConfig.from_yaml(args.config)
         if args.dry_run:
             images, splits = plan(cfg, Path(args.source))
-            print(f"dry run: {len(images)} images for {cfg.name}, labels {cfg.labels}")
+            print(f"dry run: {len(images)} images for {cfg.name}, classes {cfg.codes}")
             _print_split(split_counts(images, splits))
             return 0
         bucket = args.bucket or os.environ.get("DATA_BUCKET")

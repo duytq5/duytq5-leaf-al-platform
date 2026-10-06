@@ -97,7 +97,7 @@ def _sha256(path: Path) -> str:
 
 
 def scan(source: Path, labels: list[str]) -> list[SourceImage]:
-    """Read <source>/<label>/*.jpg. Fails on unknown or empty label folders,
+    """Read <source>/<class code>/*.jpg. Fails on unknown or empty label folders,
     non-JPEG files, and the same image filed under two labels."""
     if not source.is_dir():
         raise SeedError(f"{source} is not a directory")
@@ -170,18 +170,10 @@ def _upload(images: list[SourceImage], dataset: str, store: ObjectStore, report:
 
 def _record(conn: psycopg.Connection, cfg: DatasetConfig, images, splits, report: SeedReport):
     with conn.transaction():
-        conn.execute(
-            "INSERT INTO datasets (name, labels) VALUES (%s, %s) ON CONFLICT (name) DO NOTHING",
-            (cfg.name, cfg.labels),
+        dataset_id = _dataset(conn, cfg)
+        class_ids = dict(
+            conn.execute("SELECT code, id FROM classes WHERE dataset_id = %s", (dataset_id,))
         )
-        dataset_id, stored = conn.execute(
-            "SELECT id, labels FROM datasets WHERE name = %s", (cfg.name,)
-        ).fetchone()
-        if stored != cfg.labels:
-            raise SeedError(
-                f"label list for {cfg.name!r} is {stored} in the database, {cfg.labels} in the "
-                "config; the order is the model's output order and cannot change"
-            )
 
         before = conn.execute(
             "SELECT count(*) FROM images WHERE dataset_id = %s", (dataset_id,)
@@ -213,16 +205,17 @@ def _record(conn: psycopg.Connection, cfg: DatasetConfig, images, splits, report
         report.new_rows = len(rows) - before
         report.existing_rows = len(images) - report.new_rows
 
-        truth = {
-            image_id: label
-            for image_id, label in conn.execute(
-                "SELECT o.image_id, o.label FROM oracle_labels o"
+        truth = dict(
+            conn.execute(
+                "SELECT o.image_id, o.class_id FROM oracle_labels o"
                 " JOIN images i ON i.id = o.image_id WHERE i.dataset_id = %s",
                 (dataset_id,),
             )
-        }
+        )
         conflicts = [
-            img.path for img in images if truth.get(rows[img.sha256][0], img.label) != img.label
+            img.path
+            for img in images
+            if truth.get(rows[img.sha256][0], class_ids[img.label]) != class_ids[img.label]
         ]
         if conflicts:
             raise SeedError(
@@ -232,16 +225,16 @@ def _record(conn: psycopg.Connection, cfg: DatasetConfig, images, splits, report
 
         with conn.cursor() as cur:
             cur.executemany(
-                "INSERT INTO oracle_labels (image_id, label) VALUES (%s, %s)"
+                "INSERT INTO oracle_labels (image_id, class_id) VALUES (%s, %s)"
                 " ON CONFLICT (image_id) DO NOTHING",
-                [(rows[img.sha256][0], img.label) for img in images],
+                [(rows[img.sha256][0], class_ids[img.label]) for img in images],
             )
             cur.executemany(
-                "INSERT INTO labels (image_id, label, round_id, source)"
+                "INSERT INTO labels (image_id, class_id, round_id, source)"
                 " VALUES (%s, %s, NULL, 'seed')"
                 " ON CONFLICT (image_id, round_id) DO NOTHING",
                 [
-                    (rows[img.sha256][0], img.label)
+                    (rows[img.sha256][0], class_ids[img.label])
                     for img in images
                     if rows[img.sha256][1] is not Split.TRAIN
                 ],
@@ -251,6 +244,37 @@ def _record(conn: psycopg.Connection, cfg: DatasetConfig, images, splits, report
     final = {sha: split for sha, (_, split) in rows.items()}
     report.kept_existing_split = sum(1 for img in images if final[img.sha256] != splits[img.sha256])
     report.split_counts = split_counts(images, final)
+
+
+def _dataset(conn: psycopg.Connection, cfg: DatasetConfig) -> int:
+    """Create the dataset and its classes if needed. The class codes and their
+    order are the model's output order, so they must match what is stored."""
+    conn.execute(
+        "INSERT INTO datasets (name) VALUES (%s) ON CONFLICT (name) DO NOTHING", (cfg.name,)
+    )
+    (dataset_id,) = conn.execute("SELECT id FROM datasets WHERE name = %s", (cfg.name,)).fetchone()
+    stored = [
+        code
+        for (code,) in conn.execute(
+            "SELECT code FROM classes WHERE dataset_id = %s ORDER BY position", (dataset_id,)
+        )
+    ]
+    if not stored:
+        with conn.cursor() as cur:
+            cur.executemany(
+                "INSERT INTO classes (dataset_id, code, position, display_name, description)"
+                " VALUES (%s, %s, %s, %s, %s)",
+                [
+                    (dataset_id, c.code, i, c.display_name, c.description)
+                    for i, c in enumerate(cfg.classes)
+                ],
+            )
+    elif stored != cfg.codes:
+        raise SeedError(
+            f"classes of {cfg.name!r} are {stored} in the database, {cfg.codes} in the "
+            "config; the order is the model's output order and cannot change"
+        )
+    return dataset_id
 
 
 def _fill_v0(conn: psycopg.Connection, dataset: str, dataset_id: int) -> int:
@@ -287,7 +311,7 @@ def _fill_v0(conn: psycopg.Connection, dataset: str, dataset_id: int) -> int:
 
 
 def plan(cfg: DatasetConfig, source: Path) -> tuple[list[SourceImage], dict[str, Split]]:
-    images = scan(source, cfg.labels)
+    images = scan(source, cfg.codes)
     return images, assign_splits(images, cfg.split)
 
 
