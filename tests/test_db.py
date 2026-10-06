@@ -67,7 +67,9 @@ def test_seed_end_to_end(conn, tmp_path):
     assert conn.execute(
         "SELECT count(*) FROM labels l JOIN images i ON i.id = l.image_id WHERE i.split = 'train'"
     ).fetchone() == (0,)
-    assert conn.execute("SELECT count(*) FROM labels WHERE round_id IS NULL").fetchone() == (12,)
+    assert conn.execute(
+        "SELECT source, count(*), count(labeled_by) FROM labels GROUP BY source"
+    ).fetchall() == [("seed", 12, 0)]
     # Train labels start empty, so selection sees no labeled images yet.
     assert conn.execute(LABELED_COUNTS_SQL, {"dataset": "toy"}).fetchall() == []
     assert conn.execute("SELECT labels FROM datasets").fetchone() == (["a", "b"],)
@@ -161,12 +163,12 @@ def test_label_insert_is_retry_safe(conn):
     (image_id,) = conn.execute("SELECT id FROM images").fetchone()
     rid = _round(conn)
     sql = (
-        "INSERT INTO labels (image_id, label, round_id) VALUES (%s, 'a', %s)"
+        "INSERT INTO labels (image_id, label, round_id, source) VALUES (%s, 'a', %s, %s)"
         " ON CONFLICT (image_id, round_id) DO NOTHING"
     )
     for _ in range(2):
-        conn.execute(sql, (image_id, rid))
-        conn.execute(sql, (image_id, None))
+        conn.execute(sql, (image_id, rid, "oracle"))
+        conn.execute(sql, (image_id, None, "seed"))
     assert conn.execute("SELECT count(*) FROM labels").fetchone() == (2,)
     assert conn.execute(LABELED_COUNTS_SQL, {"dataset": "toy"}).fetchall() == [("a", 1)]
 
@@ -205,3 +207,32 @@ def test_natural_keys_stay_unique(conn):
     for _ in range(2):
         conn.execute(capture, (cid, "1" * 64))
     assert conn.execute("SELECT count(*) FROM captures").fetchone() == (1,)
+
+
+@pytest.mark.parametrize(
+    ("source", "with_round", "labeled_by", "ok"),
+    [
+        ("seed", False, None, True),
+        ("oracle", True, None, True),
+        ("expert", True, "labeler1", True),
+        ("seed", True, None, False),  # seed labels belong to no round
+        ("oracle", False, None, False),  # oracle and expert labels belong to a round
+        ("expert", True, None, False),  # an expert label names its labeler
+        ("oracle", True, "labeler1", False),  # only experts have a labeler
+        ("human", True, None, False),
+    ],
+)
+def test_label_source_rules(conn, source, with_round, labeled_by, ok):
+    _image(conn, "train", "unlabeled")
+    (image_id,) = conn.execute("SELECT id FROM images").fetchone()
+    rid = _round(conn) if with_round else None
+    insert = lambda: conn.execute(  # noqa: E731
+        "INSERT INTO labels (image_id, label, round_id, source, labeled_by)"
+        " VALUES (%s, 'a', %s, %s, %s)",
+        (image_id, rid, source, labeled_by),
+    )
+    if ok:
+        insert()
+    else:
+        with pytest.raises(psycopg.errors.CheckViolation):
+            insert()

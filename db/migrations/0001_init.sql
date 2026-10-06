@@ -58,16 +58,22 @@ CREATE TABLE rounds (
 CREATE UNIQUE INDEX rounds_one_active_per_dataset
     ON rounds (dataset_id) WHERE status IN ('pending', 'running');
 
--- Labels used for training. round_id is NULL for labels that came with the
--- dataset (val and test images at seeding). An image can be relabeled in a
--- later round; (image_id, round_id) is unique so a retried merge is a no-op.
+-- Labels used for training. An image can be relabeled in a later round;
+-- (image_id, round_id) is unique so a retried merge is a no-op.
+--   source 'seed'    came with the dataset (val and test at seeding); no round
+--   source 'oracle'  simulation: copied from oracle_labels in a round
+--   source 'expert'  production: a Label Studio user, named in labeled_by
 CREATE TABLE labels (
     id          bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
     image_id    bigint NOT NULL REFERENCES images (id),
     round_id    uuid REFERENCES rounds (id),
     label       text NOT NULL,
+    source      text NOT NULL CHECK (source IN ('expert', 'oracle', 'seed')),
+    labeled_by  text,
     created_at  timestamptz NOT NULL DEFAULT now(),
-    UNIQUE NULLS NOT DISTINCT (image_id, round_id)
+    UNIQUE NULLS NOT DISTINCT (image_id, round_id),
+    CONSTRAINT seed_labels_have_no_round CHECK ((source = 'seed') = (round_id IS NULL)),
+    CONSTRAINT only_experts_have_a_labeler CHECK ((source = 'expert') = (labeled_by IS NOT NULL))
 );
 
 -- Ground truth for simulation mode, read only by the oracle. Kept apart from

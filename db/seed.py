@@ -10,7 +10,8 @@ already in Postgres keep the split they were given the first time.
 
 What lands where:
   train images  status 'unlabeled' (the AL pool); ground truth only in oracle_labels
-  val, test     status 'labeled'; ground truth in labels (round_id NULL) and oracle_labels
+  val, test     status 'labeled'; ground truth in labels (source 'seed', no round)
+                and oracle_labels
 """
 
 import hashlib
@@ -231,7 +232,8 @@ def _record(conn: psycopg.Connection, cfg: DatasetConfig, images, splits, report
                 [(rows[img.sha256][0], img.label) for img in images],
             )
             cur.executemany(
-                "INSERT INTO labels (image_id, label, round_id) VALUES (%s, %s, NULL)"
+                "INSERT INTO labels (image_id, label, round_id, source)"
+                " VALUES (%s, %s, NULL, 'seed')"
                 " ON CONFLICT (image_id, round_id) DO NOTHING",
                 [
                     (rows[img.sha256][0], img.label)
