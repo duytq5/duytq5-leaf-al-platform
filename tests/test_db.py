@@ -70,8 +70,14 @@ def test_seed_end_to_end(conn, tmp_path):
     assert conn.execute(
         "SELECT source, count(*), count(labeled_by) FROM labels GROUP BY source"
     ).fetchall() == [("seed", 12, 0)]
-    # Train labels start empty, so selection sees no labeled images yet.
-    assert conn.execute(LABELED_COUNTS_SQL, {"dataset": "toy"}).fetchall() == []
+    # v0 holds exactly the seed labels; it has no train labels, so selection
+    # sees no labeled images yet.
+    assert report.v0_added == 12
+    v0 = _v0(conn)
+    assert conn.execute(
+        "SELECT count(*) FROM dataset_version_labels WHERE version_id = %s", (v0,)
+    ).fetchone() == (12,)
+    assert conn.execute(LABELED_COUNTS_SQL, {"version_id": v0}).fetchall() == []
     assert conn.execute("SELECT labels FROM datasets").fetchone() == (["a", "b"],)
 
 
@@ -138,13 +144,25 @@ def test_eval_images_can_never_enter_the_pool(conn, split, status):
         conn.execute("UPDATE images SET status = %s", (status,))
 
 
-def _round(conn, status: str = "pending") -> uuid.UUID:
+def _v0(conn) -> int:
+    conn.execute(
+        "INSERT INTO dataset_versions (dataset_id, version)"
+        " SELECT id, 0 FROM datasets WHERE name = 'toy' ON CONFLICT DO NOTHING"
+    )
+    return conn.execute(
+        "SELECT v.id FROM dataset_versions v JOIN datasets d ON d.id = v.dataset_id"
+        " WHERE d.name = 'toy' AND v.version = 0"
+    ).fetchone()[0]
+
+
+def _round(conn, status: str = "pending", base: int | None = None) -> uuid.UUID:
     rid = uuid.uuid4()
     conn.execute(
-        "INSERT INTO rounds (id, dataset_id, mode, strategy, k, seed, status, started_by)"
-        " SELECT %s, id, 'simulation', 'random', 10, 42, %s, 'owner' FROM datasets"
+        "INSERT INTO rounds (id, dataset_id, base_version_id, mode, strategy, k, seed, status,"
+        " started_by)"
+        " SELECT %s, id, %s, 'simulation', 'random', 10, 42, %s, 'owner' FROM datasets"
         " WHERE name = 'toy'",
-        (rid, status),
+        (rid, base or _v0(conn), status),
     )
     return rid
 
@@ -170,7 +188,6 @@ def test_label_insert_is_retry_safe(conn):
         conn.execute(sql, (image_id, rid, "oracle"))
         conn.execute(sql, (image_id, None, "seed"))
     assert conn.execute("SELECT count(*) FROM labels").fetchone() == (2,)
-    assert conn.execute(LABELED_COUNTS_SQL, {"dataset": "toy"}).fetchall() == [("a", 1)]
 
 
 def test_every_table_has_an_id_primary_key(conn):
@@ -184,7 +201,17 @@ def test_every_table_has_an_id_primary_key(conn):
         " GROUP BY tc.table_name"
     ).fetchall()
     assert dict(rows) == {
-        t: "id" for t in ("datasets", "images", "rounds", "labels", "oracle_labels", "captures")
+        t: "id"
+        for t in (
+            "datasets",
+            "images",
+            "rounds",
+            "labels",
+            "oracle_labels",
+            "dataset_versions",
+            "dataset_version_labels",
+            "captures",
+        )
     }
 
 
@@ -236,3 +263,112 @@ def test_label_source_rules(conn, source, with_round, labeled_by, ok):
     else:
         with pytest.raises(psycopg.errors.CheckViolation):
             insert()
+
+
+def _label(conn, image_id: int, label: str, round_id) -> int:
+    return conn.execute(
+        "INSERT INTO labels (image_id, label, round_id, source) VALUES (%s, %s, %s, 'oracle')"
+        " RETURNING id",
+        (image_id, label, round_id),
+    ).fetchone()[0]
+
+
+def _next_version(conn, parent: int, round_id) -> int:
+    """What the merge step will do: copy the parent's rows, then add or replace
+    rows with this round's labels."""
+    with conn.transaction():
+        (vid,) = conn.execute(
+            "INSERT INTO dataset_versions (dataset_id, version, parent_version_id,"
+            " created_by_round_id)"
+            " SELECT dataset_id, version + 1, id, %s FROM dataset_versions WHERE id = %s"
+            " RETURNING id",
+            (round_id, parent),
+        ).fetchone()
+        conn.execute(
+            "INSERT INTO dataset_version_labels (version_id, image_id, label_id)"
+            " SELECT %s, image_id, label_id FROM dataset_version_labels WHERE version_id = %s",
+            (vid, parent),
+        )
+        conn.execute(
+            "INSERT INTO dataset_version_labels (version_id, image_id, label_id)"
+            " SELECT %s, image_id, id FROM labels WHERE round_id = %s"
+            " ON CONFLICT (version_id, image_id) DO UPDATE SET label_id = EXCLUDED.label_id",
+            (vid, round_id),
+        )
+    return vid
+
+
+def test_versions_keep_strategies_and_rollbacks_apart(conn, tmp_path):
+    seed_dataset(conn, CFG, make_folder(tmp_path, {"a": 20, "b": 10}), FakeStore())
+    v0 = _v0(conn)
+    train = [r[0] for r in conn.execute("SELECT id FROM images WHERE split = 'train' ORDER BY id")]
+
+    # Round 1 on v0 labels two images -> v1.
+    r1 = _round(conn, base=v0)
+    _label(conn, train[0], "a", r1)
+    _label(conn, train[1], "b", r1)
+    conn.execute("UPDATE rounds SET status = 'succeeded' WHERE id = %s", (r1,))
+    v1 = _next_version(conn, v0, r1)
+    assert sorted(conn.execute(LABELED_COUNTS_SQL, {"version_id": v1}).fetchall()) == [
+        ("a", 1),
+        ("b", 1),
+    ]
+
+    # Round 2 on v1 corrects image 0 (a new row, not an update) -> v2.
+    r2 = _round(conn, base=v1)
+    _label(conn, train[0], "b", r2)
+    conn.execute("UPDATE rounds SET status = 'succeeded' WHERE id = %s", (r2,))
+    v2 = _next_version(conn, v1, r2)
+    assert conn.execute(LABELED_COUNTS_SQL, {"version_id": v2}).fetchall() == [("b", 2)]
+
+    # Older versions are unchanged, and another strategy starting from v0 sees nothing.
+    assert sorted(conn.execute(LABELED_COUNTS_SQL, {"version_id": v1}).fetchall()) == [
+        ("a", 1),
+        ("b", 1),
+    ]
+    assert conn.execute(LABELED_COUNTS_SQL, {"version_id": v0}).fetchall() == []
+    assert conn.execute(
+        "SELECT version, parent_version_id FROM dataset_versions WHERE id = %s", (v2,)
+    ).fetchone() == (2, v1)
+    # A round creates at most one version.
+    with pytest.raises(psycopg.errors.UniqueViolation):
+        _next_version(conn, v1, r2)
+
+
+def test_labels_are_append_only(conn):
+    _image(conn, "train", "unlabeled")
+    (image_id,) = conn.execute("SELECT id FROM images").fetchone()
+    _label(conn, image_id, "a", _round(conn))
+    for sql in ("UPDATE labels SET label = 'b'", "DELETE FROM labels", "TRUNCATE labels CASCADE"):
+        with pytest.raises(psycopg.errors.RaiseException, match="append-only"):
+            conn.execute(sql)
+
+
+def test_version_label_must_belong_to_its_image(conn):
+    _image(conn, "train", "unlabeled", sha="0" * 64)
+    _image(conn, "train", "unlabeled", sha="1" * 64)
+    first, second = (r[0] for r in conn.execute("SELECT id FROM images ORDER BY id"))
+    label_id = _label(conn, first, "a", _round(conn))
+    with pytest.raises(psycopg.errors.ForeignKeyViolation):
+        conn.execute(
+            "INSERT INTO dataset_version_labels (version_id, image_id, label_id)"
+            " VALUES (%s, %s, %s)",
+            (_v0(conn), second, label_id),
+        )
+
+
+def test_only_v0_has_no_parent(conn):
+    _image(conn, "train", "unlabeled")
+    with pytest.raises(psycopg.errors.CheckViolation):
+        conn.execute(
+            "INSERT INTO dataset_versions (dataset_id, version)"
+            " SELECT id, 1 FROM datasets WHERE name = 'toy'"
+        )
+
+
+def test_seed_refuses_to_change_v0_once_a_round_used_it(conn, tmp_path):
+    seed_dataset(conn, CFG, make_folder(tmp_path, {"a": 20, "b": 10}), FakeStore())
+    _round(conn)
+    make_folder(tmp_path, {"a": 10}, start=20)
+    with pytest.raises(SeedError, match="trained on v0"):
+        seed_dataset(conn, CFG, tmp_path, FakeStore())

@@ -12,6 +12,10 @@ What lands where:
   train images  status 'unlabeled' (the AL pool); ground truth only in oracle_labels
   val, test     status 'labeled'; ground truth in labels (source 'seed', no round)
                 and oracle_labels
+
+The seed also makes dataset version v0: the seed labels, which every
+strategy's first round starts from. Once a round has used v0 it is frozen, and
+seeding new val/test images is refused (they would change v0 under that round).
 """
 
 import hashlib
@@ -52,6 +56,7 @@ class SeedReport:
     new_rows: int = 0
     existing_rows: int = 0
     kept_existing_split: int = 0
+    v0_added: int = 0
 
 
 class ObjectStore(Protocol):
@@ -241,10 +246,44 @@ def _record(conn: psycopg.Connection, cfg: DatasetConfig, images, splits, report
                     if rows[img.sha256][1] is not Split.TRAIN
                 ],
             )
+        report.v0_added = _fill_v0(conn, cfg.name, dataset_id)
 
     final = {sha: split for sha, (_, split) in rows.items()}
     report.kept_existing_split = sum(1 for img in images if final[img.sha256] != splits[img.sha256])
     report.split_counts = split_counts(images, final)
+
+
+def _fill_v0(conn: psycopg.Connection, dataset: str, dataset_id: int) -> int:
+    """Create v0 if needed and add the seed labels it is missing."""
+    conn.execute(
+        "INSERT INTO dataset_versions (dataset_id, version) VALUES (%s, 0)"
+        " ON CONFLICT (dataset_id, version) DO NOTHING",
+        (dataset_id,),
+    )
+    (v0,) = conn.execute(
+        "SELECT id FROM dataset_versions WHERE dataset_id = %s AND version = 0", (dataset_id,)
+    ).fetchone()
+    missing = conn.execute(
+        "SELECT l.id, l.image_id FROM labels l JOIN images i ON i.id = l.image_id"
+        " WHERE i.dataset_id = %s AND l.source = 'seed' AND NOT EXISTS ("
+        "   SELECT 1 FROM dataset_version_labels v"
+        "   WHERE v.version_id = %s AND v.image_id = l.image_id)",
+        (dataset_id, v0),
+    ).fetchall()
+    if not missing:
+        return 0
+    if conn.execute("SELECT 1 FROM rounds WHERE base_version_id = %s", (v0,)).fetchone():
+        raise SeedError(
+            f"{len(missing)} new val/test images for {dataset!r}, but a round already "
+            "trained on v0, which must not change; seed them into a new dataset"
+        )
+    with conn.cursor() as cur:
+        cur.executemany(
+            "INSERT INTO dataset_version_labels (version_id, image_id, label_id)"
+            " VALUES (%s, %s, %s)",
+            [(v0, image_id, label_id) for label_id, image_id in missing],
+        )
+    return len(missing)
 
 
 def plan(cfg: DatasetConfig, source: Path) -> tuple[list[SourceImage], dict[str, Split]]:

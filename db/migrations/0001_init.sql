@@ -1,5 +1,6 @@
--- Metadata for the AL loop: datasets, images, labels, rounds, the simulation
--- oracle's ground truth, and edge captures. Applied once by `al db migrate`.
+-- Metadata for the AL loop: datasets, images, labels, rounds, dataset
+-- versions, the simulation oracle's ground truth, and edge captures.
+-- Applied once by `al db migrate`.
 --
 -- Every table has a surrogate primary key `id`. Natural keys are UNIQUE
 -- constraints, so retried inserts (ON CONFLICT ... DO NOTHING) stay no-ops.
@@ -32,9 +33,29 @@ CREATE TABLE images (
 );
 CREATE INDEX images_pool_idx ON images (dataset_id, split, status);
 
+-- A version is the exact labeled set a round trains on. v0 is made by the
+-- seed; each round's merge step makes the next one (parent = the round's
+-- base version), so rolling back is starting a round from an older version,
+-- and simulated strategies that each start from v0 never see each other's
+-- labels. The rows of a version are in dataset_version_labels.
+CREATE TABLE dataset_versions (
+    id                   bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    dataset_id           bigint NOT NULL REFERENCES datasets (id),
+    version              integer NOT NULL CHECK (version >= 0),
+    parent_version_id    bigint REFERENCES dataset_versions (id),
+    created_by_round_id  uuid UNIQUE,  -- FK to rounds, added below
+    manifest_uri         text,  -- manifests/{dataset}/v{n}.parquet, once exported
+    created_at           timestamptz NOT NULL DEFAULT now(),
+    UNIQUE (dataset_id, version),
+    CONSTRAINT v0_has_no_parent CHECK (
+        (version = 0) = (parent_version_id IS NULL AND created_by_round_id IS NULL)
+    )
+);
+
 CREATE TABLE rounds (
     id               uuid PRIMARY KEY,
     dataset_id       bigint NOT NULL REFERENCES datasets (id),
+    base_version_id  bigint NOT NULL REFERENCES dataset_versions (id),  -- what it trains on
     mode             text NOT NULL CHECK (mode IN ('simulation', 'production')),
     -- The human-chosen selection settings from the round config YAML.
     strategy         text NOT NULL,
@@ -42,7 +63,6 @@ CREATE TABLE rounds (
     k                integer NOT NULL CHECK (k > 0),
     seed             integer NOT NULL,
     model_version    text,
-    dataset_version  text,
     status           text NOT NULL DEFAULT 'pending'
                      CHECK (status IN ('pending', 'running', 'succeeded', 'failed', 'cancelled')),
     metrics          jsonb,
@@ -58,8 +78,13 @@ CREATE TABLE rounds (
 CREATE UNIQUE INDEX rounds_one_active_per_dataset
     ON rounds (dataset_id) WHERE status IN ('pending', 'running');
 
--- Labels used for training. An image can be relabeled in a later round;
--- (image_id, round_id) is unique so a retried merge is a no-op.
+ALTER TABLE dataset_versions
+    ADD FOREIGN KEY (created_by_round_id) REFERENCES rounds (id);
+
+-- Every label ever given, append-only: a correction is a new row in a later
+-- round, never an UPDATE. Which label counts for training is decided by the
+-- dataset version (dataset_version_labels). (image_id, round_id) is unique so
+-- a retried merge is a no-op.
 --   source 'seed'    came with the dataset (val and test at seeding); no round
 --   source 'oracle'  simulation: copied from oracle_labels in a round
 --   source 'expert'  production: a Label Studio user, named in labeled_by
@@ -73,7 +98,31 @@ CREATE TABLE labels (
     created_at  timestamptz NOT NULL DEFAULT now(),
     UNIQUE NULLS NOT DISTINCT (image_id, round_id),
     CONSTRAINT seed_labels_have_no_round CHECK ((source = 'seed') = (round_id IS NULL)),
-    CONSTRAINT only_experts_have_a_labeler CHECK ((source = 'expert') = (labeled_by IS NOT NULL))
+    CONSTRAINT only_experts_have_a_labeler CHECK ((source = 'expert') = (labeled_by IS NOT NULL)),
+    UNIQUE (id, image_id)  -- target of dataset_version_labels' (label_id, image_id)
+);
+
+CREATE FUNCTION labels_append_only() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+    RAISE EXCEPTION 'labels is append-only: % is not allowed; insert a new label instead', TG_OP;
+END
+$$;
+CREATE TRIGGER labels_append_only
+    BEFORE UPDATE OR DELETE ON labels
+    FOR EACH ROW EXECUTE FUNCTION labels_append_only();
+CREATE TRIGGER labels_no_truncate
+    BEFORE TRUNCATE ON labels
+    FOR EACH STATEMENT EXECUTE FUNCTION labels_append_only();
+
+-- The exact labeled set of each version: one label per image per version.
+-- The composite FK makes sure label_id is a label of image_id.
+CREATE TABLE dataset_version_labels (
+    id          bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    version_id  bigint NOT NULL REFERENCES dataset_versions (id),
+    image_id    bigint NOT NULL REFERENCES images (id),
+    label_id    bigint NOT NULL,
+    UNIQUE (version_id, image_id),
+    FOREIGN KEY (label_id, image_id) REFERENCES labels (id, image_id)
 );
 
 -- Ground truth for simulation mode, read only by the oracle. Kept apart from

@@ -72,7 +72,10 @@ it with a split that is stratified per class and fixed by the split seed.
 Re-running it skips what is already there, and an image keeps its first split.
 Train images become the AL pool (`unlabeled`), with their ground truth only in
 `oracle_labels`. Val and test images are `labeled` and can never enter the pool
-(a database constraint enforces it).
+(a database constraint enforces it). The seed also creates dataset version v0 (the seed labels),
+which every strategy's first round starts from. Each round's merge step makes
+the next version, and `labels` is append-only, so any version can be rebuilt or
+rolled back to.
 
 ### AWS
 

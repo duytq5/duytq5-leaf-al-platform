@@ -48,8 +48,8 @@ class PoolData:
 class LabeledStats:
     """Aggregate statistics of the labeled set, not per-image data.
 
-    Loaded with one GROUP BY over the labels table (see LABELED_COUNTS_SQL), so
-    a round never pulls labeled-image metadata into memory.
+    Loaded with one GROUP BY over the round's base dataset version (see
+    LABELED_COUNTS_SQL), so a round never pulls labeled-image metadata into memory.
     """
 
     class_counts: np.ndarray  # (num_classes,) labeled images per class, label-list order
@@ -75,14 +75,15 @@ class LabeledStats:
         return cls(class_counts=np.array([counts.get(y, 0) for y in label_list], dtype=np.int64))
 
 
-# Per-class labeled counts for one dataset's training split. Test-split images
-# never enter the pool, so they are excluded here too.
+# Per-class labeled counts in the dataset version a round trains on. Only the
+# training split counts: val and test labels are in every version but never
+# in the pool.
 LABELED_COUNTS_SQL = """
-SELECT l.label, count(DISTINCT l.image_id) AS n
-FROM labels l
-JOIN images i ON i.id = l.image_id
-JOIN datasets d ON d.id = i.dataset_id
-WHERE d.name = %(dataset)s AND i.split = 'train'
+SELECT l.label, count(*) AS n
+FROM dataset_version_labels v
+JOIN labels l ON l.id = v.label_id
+JOIN images i ON i.id = v.image_id
+WHERE v.version_id = %(version_id)s AND i.split = 'train'
 GROUP BY l.label
 """
 

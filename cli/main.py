@@ -83,7 +83,8 @@ def cmd_seed(args: argparse.Namespace) -> int:
         return 1
     print(
         f"{cfg.name}: uploaded {report.uploaded}, already in S3 {report.already_in_s3}; "
-        f"new rows {report.new_rows}, existing {report.existing_rows}"
+        f"new rows {report.new_rows}, existing {report.existing_rows}; "
+        f"v0 labels added {report.v0_added}"
         + (
             f", kept earlier split for {report.kept_existing_split}"
             if report.kept_existing_split
