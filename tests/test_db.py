@@ -259,9 +259,9 @@ def test_natural_keys_stay_unique(conn):
         conn.execute(oracle, (image_id,))
     model = _model(conn, _round(conn))
     capture = (
-        "INSERT INTO captures (capture_id, dataset_id, sha256, device_id, model_version_id,"
-        " top1_class_id, confidence, probs, captured_at)"
-        f" SELECT %s, id, %s, 'dev', %s, {CLASS_A}, 0.6,"
+        "INSERT INTO captures (capture_id, dataset_id, sha256, device_id, user_sub,"
+        " model_version_id, top1_class_id, confidence, probs, captured_at)"
+        f" SELECT %s, id, %s, 'dev', 'user-sub', %s, {CLASS_A}, 0.6,"
         """ '{"a": 0.6, "b": 0.4}', now()"""
         " FROM datasets WHERE name = 'toy'"
         " ON CONFLICT (capture_id) DO NOTHING"
@@ -487,3 +487,10 @@ def test_query_indexes_exist(conn):
     assert ("images", "(dataset_id, split, status)") in defs
     assert ("labels", "(round_id)") in defs
     assert ("model_releases", "(released_at DESC, id DESC)") in defs
+    assert ("captures", "(user_sub, created_at)") in defs
+
+
+def test_rejected_is_a_train_status_only(conn):
+    _image(conn, "train", "rejected")
+    with pytest.raises(psycopg.errors.CheckViolation):
+        _image(conn, "test", "rejected", sha="1" * 64)

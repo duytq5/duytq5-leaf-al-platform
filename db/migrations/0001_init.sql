@@ -35,7 +35,10 @@ CREATE TABLE images (
     dataset_id  bigint NOT NULL REFERENCES datasets (id),
     sha256      text NOT NULL CHECK (sha256 ~ '^[0-9a-f]{64}$'),
     s3_key      text NOT NULL,
-    status      text NOT NULL CHECK (status IN ('pending', 'unlabeled', 'queued', 'labeled')),
+    -- 'rejected': the expert marked it "not a leaf" in Label Studio. Terminal; it
+    -- gets no label and is never trained on.
+    status      text NOT NULL
+                CHECK (status IN ('pending', 'unlabeled', 'queued', 'labeled', 'rejected')),
     split       text NOT NULL CHECK (split IN ('train', 'val', 'test')),
     source      text NOT NULL CHECK (source IN ('seed', 'edge')),
     created_at  timestamptz NOT NULL DEFAULT now(),
@@ -210,11 +213,14 @@ CREATE TABLE captures (
     image_id       bigint REFERENCES images (id),
     dataset_id     bigint NOT NULL REFERENCES datasets (id),
     sha256         text NOT NULL CHECK (sha256 ~ '^[0-9a-f]{64}$'),
-    device_id      text NOT NULL,  -- from the Cognito JWT, never from the request body
+    device_id      text NOT NULL,
+    user_sub       text NOT NULL,  -- uploader's Cognito sub from the JWT, never from the body
     model_version_id bigint NOT NULL REFERENCES model_versions (id),  -- the on-device model
     top1_class_id  bigint NOT NULL REFERENCES classes (id),
     confidence     real NOT NULL CHECK (confidence BETWEEN 0 AND 1),
     probs          jsonb NOT NULL,  -- keyed by class code
-    captured_at    timestamptz NOT NULL,
-    created_at     timestamptz NOT NULL DEFAULT now()
+    captured_at    timestamptz NOT NULL,  -- phone clock
+    created_at     timestamptz NOT NULL DEFAULT now()  -- server clock; upload limits use it
 );
+-- Uploads per user in a time window (rate limit, blocking).
+CREATE INDEX captures_user_recent_idx ON captures (user_sub, created_at);

@@ -15,6 +15,7 @@ class ImageStatus(StrEnum):
     UNLABELED = "unlabeled"
     QUEUED = "queued"
     LABELED = "labeled"
+    REJECTED = "rejected"  # expert marked it "not a leaf"; terminal, never trained on
 
 
 class Split(StrEnum):
