@@ -270,19 +270,6 @@ def test_natural_keys_stay_unique(conn):
     for _ in range(2):
         conn.execute(capture, (cid, "1" * 64, model))
     assert conn.execute("SELECT count(*) FROM captures").fetchone() == (1,)
-    feedback = (
-        "INSERT INTO captures (capture_id, dataset_id, sha256, device_id, user_sub,"
-        " model_version_id, top1_class_id, confidence, probs, captured_at,"
-        " user_agrees, user_class_id)"
-        f" SELECT %s, id, %s, 'dev', 'user-sub', %s, {CLASS_A}, 0.6, '{{}}', now(), %s,"
-        f" CASE WHEN %s THEN {CLASS_A} END"
-        " FROM datasets WHERE name = 'toy'"
-    )
-    conn.execute(feedback, (uuid.uuid4(), "2" * 64, model, False, True))
-    conn.execute(feedback, (uuid.uuid4(), "3" * 64, model, None, False))
-    for agrees in (True, None):  # a suggested class means the user disagreed
-        with pytest.raises(psycopg.errors.CheckViolation):
-            conn.execute(feedback, (uuid.uuid4(), "4" * 64, model, agrees, True))
 
 
 @pytest.mark.parametrize(

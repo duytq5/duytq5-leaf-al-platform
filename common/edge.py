@@ -14,7 +14,7 @@ from uuid import UUID
 from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, HttpUrl, model_validator
 
 from common.manifest import ModelManifest
-from common.types import ClassCode, DatasetName, Probability, Sha256
+from common.types import DatasetName, Probability, Sha256
 
 MAX_UPLOAD_BYTES = 20 * 1024 * 1024
 
@@ -42,29 +42,12 @@ class Inference(_Strict):
         return self
 
 
-class Feedback(_Strict):
-    """The user's optional opinion of the prediction.
-
-    Shown to the expert as a hint; never stored as a label.
-    """
-
-    agrees: bool | None = None
-    suggested_class: ClassCode | None = None
-
-    @model_validator(mode="after")
-    def _suggest_only_on_disagree(self) -> Self:
-        if self.suggested_class is not None and self.agrees is not False:
-            raise ValueError("suggested_class is only allowed when agrees is false")
-        return self
-
-
 class CaptureRequest(_Strict):
     capture_id: UUID
     dataset: DatasetName
     captured_at: AwareDatetime
     image: ImageInfo
     inference: Inference
-    feedback: Feedback | None = None
 
 
 class CaptureStatus(StrEnum):
