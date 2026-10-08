@@ -7,7 +7,7 @@ and consumers validate against the same schema.
 
 from common.config import TrainConfig
 from common.dataset import ClassConfig, DatasetConfig, SplitConfig
-from common.edge import CaptureRequest, CaptureResponse, CaptureStatus, DeviceConfig
+from common.edge import CaptureRequest, CaptureResponse, CaptureStatus, DeviceConfig, Feedback
 from common.jobs import ExportJob, JobMessage, JobType, ScoreJob, TrainJob, parse_job
 from common.manifest import ModelManifest
 from common.round import RoundConfig, SelectionConfig
@@ -21,6 +21,7 @@ __all__ = [
     "DatasetConfig",
     "DeviceConfig",
     "ExportJob",
+    "Feedback",
     "ImageSource",
     "ImageStatus",
     "JobMessage",

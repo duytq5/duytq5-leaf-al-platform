@@ -128,6 +128,17 @@ def _capture() -> dict:
 def test_capture_request_from_doc_example():
     req = CaptureRequest.model_validate(_capture())
     assert req.inference.top1 == "leaf_blight"
+    assert req.feedback is None
+
+
+@pytest.mark.parametrize(
+    "feedback",
+    [{}, {"agrees": True}, {"agrees": False}, {"agrees": False, "suggested_class": "rust"}],
+)
+def test_capture_request_accepts_feedback(feedback):
+    c = _capture()
+    c["feedback"] = feedback
+    assert CaptureRequest.model_validate(c).feedback is not None
 
 
 @pytest.mark.parametrize(
@@ -138,6 +149,9 @@ def test_capture_request_from_doc_example():
         lambda c: c["inference"].update(top1="rust"),  # not in probs
         lambda c: c["inference"].update(confidence=1.5),
         lambda c: c.update(device_id="phone-1"),  # comes from the JWT, not the body
+        lambda c: c.update(feedback={"agrees": True, "suggested_class": "rust"}),
+        lambda c: c.update(feedback={"suggested_class": "rust"}),  # agrees not false
+        lambda c: c.update(feedback={"agrees": False, "suggested_class": "Rust!"}),
     ],
 )
 def test_capture_request_rejects_bad_input(mutate):

@@ -220,7 +220,13 @@ CREATE TABLE captures (
     confidence     real NOT NULL CHECK (confidence BETWEEN 0 AND 1),
     probs          jsonb NOT NULL,  -- keyed by class code
     captured_at    timestamptz NOT NULL,  -- phone clock
-    created_at     timestamptz NOT NULL DEFAULT now()  -- server clock; upload limits use it
+    -- Optional user feedback on the prediction. Shown to the expert in Label
+    -- Studio as a hint; never used as a label.
+    user_agrees    boolean,
+    user_class_id  bigint REFERENCES classes (id),  -- class the user suggests
+    created_at     timestamptz NOT NULL DEFAULT now(),  -- server clock; upload limits use it
+    CONSTRAINT suggestion_only_on_disagree
+        CHECK (user_class_id IS NULL OR user_agrees IS FALSE)
 );
 -- Uploads per user in a time window (rate limit, blocking).
 CREATE INDEX captures_user_recent_idx ON captures (user_sub, created_at);
