@@ -116,6 +116,9 @@ CREATE TABLE labels (
 );
 
 -- History tables (labels, model_releases) only ever grow.
+-- Labeling progress of a round (and the merge step's "this round's labels").
+CREATE INDEX labels_round_idx ON labels (round_id);
+
 CREATE FUNCTION reject_change() RETURNS trigger LANGUAGE plpgsql AS $$
 BEGIN
     RAISE EXCEPTION '% is append-only: % is not allowed; insert a new row instead',

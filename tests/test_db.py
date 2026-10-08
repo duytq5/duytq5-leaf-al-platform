@@ -477,3 +477,13 @@ def test_model_class_snapshot_is_a_json_array(conn):
             "UPDATE model_versions SET labels = %s WHERE id = %s",
             (Jsonb({"code": "a"}), model),
         )
+
+
+def test_query_indexes_exist(conn):
+    rows = conn.execute(
+        "SELECT tablename, indexdef FROM pg_indexes WHERE schemaname = 'public'"
+    ).fetchall()
+    defs = {(t, d.split(" USING btree ")[1]) for t, d in rows}
+    assert ("images", "(dataset_id, split, status)") in defs
+    assert ("labels", "(round_id)") in defs
+    assert ("model_releases", "(released_at DESC, id DESC)") in defs
