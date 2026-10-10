@@ -82,7 +82,7 @@ CREATE TABLE rounds (
     status           text NOT NULL DEFAULT 'pending'
                      CHECK (status IN ('pending', 'running', 'succeeded', 'failed', 'cancelled')),
     metrics          jsonb,
-    started_by       text NOT NULL,  -- Cognito username or the IAM principal of the CLI
+    started_by       text NOT NULL,  -- GitHub login that merged the round-config PR
     -- Production mode (Phase 2): the Label Studio project for this round and
     -- the task token its webhook resumes.
     label_task_token text,
@@ -193,7 +193,7 @@ CREATE TABLE model_releases (
     id                bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
     model_version_id  bigint NOT NULL REFERENCES model_versions (id),
     action            text NOT NULL CHECK (action IN ('promote', 'rollback')),
-    released_by       text NOT NULL,
+    released_by       text NOT NULL,  -- GitHub login that merged the release PR
     released_at       timestamptz NOT NULL DEFAULT now()
 );
 CREATE INDEX model_releases_latest_idx ON model_releases (released_at DESC, id DESC);
