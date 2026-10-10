@@ -16,6 +16,22 @@ jobs:
       - run: uv sync --locked --extra infra
       - run: uv run ruff check .
       - run: uv run ruff format --check .
-      - run: uv run pytest
       - name: Validate EC2 compose file
         run: cp deploy/ec2/.env.example deploy/ec2/.env && docker compose -f deploy/ec2/docker-compose.yml config -q
+      # Database tests run against the real compose Postgres, with the same
+      # TLS settings and pg_hba.conf as on EC2.
+      - name: Start Postgres with TLS
+        working-directory: deploy/ec2
+        run: |
+          sed -i "s|^POSTGRES_PASSWORD=.*|POSTGRES_PASSWORD=$(openssl rand -hex 24)|; s|^DATA_DIR=.*|DATA_DIR=./data|" .env
+          ./make-tls.sh
+          docker compose up -d --wait postgres
+      - name: Tests
+        run: |
+          . deploy/ec2/.env
+          url="postgresql://al:$POSTGRES_PASSWORD@127.0.0.1:5432/al"
+          # A connection without TLS must be refused.
+          if uv run python -c "import psycopg; psycopg.connect('$url?sslmode=disable')" 2>/dev/null; then
+            echo "Postgres accepted a connection without TLS"; exit 1
+          fi
+          TEST_DATABASE_URL="$url?sslmode=verify-ca&sslrootcert=deploy/ec2/tls/server.crt" uv run pytest

@@ -10,12 +10,14 @@ uploads images and downloads ONNX models.
 | Path | What lives there |
 | --- | --- |
 | `common/` | Shared Pydantic models: SQS job messages, Edge API bodies, model manifest, training config, S3 key layout |
+| `db/` | Postgres schema (`db/migrations/*.sql`), migration runner, dataset seed script |
 | `selection/` | Selection strategy registry (`@register("name")`) and the built-in strategies |
 | `worker/` | Local GPU worker: long-polls SQS, runs `train` / `score` / `export` jobs |
 | `lambdas/` | Lambda handlers (select, oracle; later edge API, validation, Label Studio webhook) |
 | `infra/` | AWS CDK app (Python), one stack: `LeafAlPlatform` |
 | `deploy/ec2/` | Docker Compose for the single EC2 instance: Postgres + MLflow |
 | `cli/` | Operator CLI `al` |
+| `configs/datasets/` | YAML dataset configs: the class list (code + display name) and the fixed train/val/test split |
 | `configs/train/` | YAML training configs |
 | `configs/rounds/` | YAML round configs: strategy, its parameters and k, chosen by a human per round |
 | `tests/` | Unit tests |
@@ -42,8 +44,40 @@ offline: `source .venv/bin/activate && npx aws-cdk synth`.
 ```bash
 cd deploy/ec2
 cp .env.example .env         # local values only; never commit .env
+./make-tls.sh                # self-signed Postgres certificate in ./tls (gitignored)
 docker compose up -d
 ```
+
+Postgres only accepts network connections over TLS, MLflow's included. To run
+the database tests against it:
+
+```bash
+. deploy/ec2/.env
+export TEST_DATABASE_URL="postgresql://al:$POSTGRES_PASSWORD@127.0.0.1:5432/al?sslmode=verify-ca&sslrootcert=deploy/ec2/tls/server.crt"
+uv run pytest                # without TEST_DATABASE_URL the database tests are skipped
+```
+
+### Database and seed data
+
+```bash
+export DATABASE_URL=...      # as above, or the EC2 one from docs/aws-setup.md
+uv run al db migrate         # create or update the tables; safe to re-run
+uv run al seed configs/datasets/rocole.yaml <image-dir> --dry-run   # show the split
+uv run al seed configs/datasets/rocole.yaml <image-dir> --bucket <data-bucket>
+```
+
+`<image-dir>` has one sub-folder of JPEGs per class, named by the class code in the dataset
+config. The seed uploads each image to `raw/<dataset>/<sha256>.jpg`, then records
+it with a split that is stratified per class and fixed by the split seed.
+Re-running it skips what is already there, and an image keeps its first split.
+The dataset config names its crop (`crop: coffee`); the seed adds or renames the
+crops listed in `configs/crops.yaml` and fails on an unknown crop code.
+Train images become the AL pool (`unlabeled`), with their ground truth only in
+`oracle_labels`. Val and test images are `labeled` and can never enter the pool
+(a database constraint enforces it). The seed also creates dataset version v0 (the seed labels),
+which every strategy's first round starts from. Each round's merge step makes
+the next version, and `labels` is append-only, so any version can be rebuilt or
+rolled back to.
 
 ### AWS
 
@@ -78,7 +112,7 @@ confidence) and `al round start`.
 - POC scope: no services or features beyond the design doc without the owner's say.
 - Jobs and Lambdas are retry-safe (SQS can deliver twice; the app retries uploads).
 - Test-split images never enter the AL pool or Label Studio.
-- One label list per dataset; its order is the model's output order and is copied into the manifest.
+- One class list per dataset (machine `code` + readable `display_name`); the order of the codes is the model's output order and is copied into the manifest.
 - Buckets are private, uploads land in `incoming/` first, secrets live in SSM Parameter Store and are never committed.
 - Cost: the EC2 instance is the only always-on resource; stop it when idle. Lambdas run outside a VPC (no NAT gateway).
 
