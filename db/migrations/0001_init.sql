@@ -8,10 +8,25 @@
 -- `id` is a bigint identity, except rounds.id: a uuid, because it is also
 -- the Step Functions execution name.
 
+-- Plants the app knows (coffee, durian). The app lists crops, then the
+-- datasets (models) of the chosen crop.
+CREATE TABLE crops (
+    id            bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    code          text NOT NULL UNIQUE CHECK (code ~ '^[a-z0-9][a-z0-9_]*$'),
+    display_name  text NOT NULL,
+    description   text,
+    created_at    timestamptz NOT NULL DEFAULT now()
+);
+
+-- `name` is the machine name used in S3 keys, configs and API payloads;
+-- `display_name` is what app users read.
 CREATE TABLE datasets (
-    id          bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-    name        text NOT NULL UNIQUE CHECK (name ~ '^[a-z0-9][a-z0-9_-]*$'),
-    created_at  timestamptz NOT NULL DEFAULT now()
+    id            bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    name          text NOT NULL UNIQUE CHECK (name ~ '^[a-z0-9][a-z0-9_-]*$'),
+    crop_id       bigint NOT NULL REFERENCES crops (id),
+    display_name  text NOT NULL,
+    description   text,
+    created_at    timestamptz NOT NULL DEFAULT now()
 );
 
 -- One class list per dataset. `code` is the machine name used by code, the

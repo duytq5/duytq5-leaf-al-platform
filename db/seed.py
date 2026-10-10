@@ -13,6 +13,9 @@ What lands where:
   val, test     status 'labeled'; ground truth in labels (source 'seed', no round)
                 and oracle_labels
 
+Crops from configs/crops.yaml are upserted by code (an existing crop only gets
+its names updated), and the dataset must name one of them.
+
 The seed also makes dataset version v0: the seed labels, which every
 strategy's first round starts from. Once a round has used v0 it is frozen, and
 seeding new val/test images is refused (they would change v0 under that round).
@@ -28,7 +31,7 @@ from typing import Protocol
 
 import psycopg
 
-from common.dataset import DatasetConfig, SplitConfig
+from common.dataset import CropsConfig, DatasetConfig, SplitConfig
 from common.s3keys import raw_key
 from common.types import ImageSource, ImageStatus, Split
 
@@ -168,8 +171,16 @@ def _upload(images: list[SourceImage], dataset: str, store: ObjectStore, report:
     report.already_in_s3 = len(results) - report.uploaded
 
 
-def _record(conn: psycopg.Connection, cfg: DatasetConfig, images, splits, report: SeedReport):
+def _record(
+    conn: psycopg.Connection,
+    cfg: DatasetConfig,
+    crops: CropsConfig,
+    images,
+    splits,
+    report: SeedReport,
+):
     with conn.transaction():
+        _upsert_crops(conn, crops)
         dataset_id = _dataset(conn, cfg)
         class_ids = dict(
             conn.execute("SELECT code, id FROM classes WHERE dataset_id = %s", (dataset_id,))
@@ -246,13 +257,33 @@ def _record(conn: psycopg.Connection, cfg: DatasetConfig, images, splits, report
     report.split_counts = split_counts(images, final)
 
 
+def _upsert_crops(conn: psycopg.Connection, crops: CropsConfig) -> None:
+    """Add new crops; an existing crop only gets its names updated."""
+    with conn.cursor() as cur:
+        cur.executemany(
+            "INSERT INTO crops (code, display_name, description) VALUES (%s, %s, %s)"
+            " ON CONFLICT (code) DO UPDATE"
+            " SET display_name = EXCLUDED.display_name, description = EXCLUDED.description",
+            [(c.code, c.display_name, c.description) for c in crops.crops],
+        )
+
+
 def _dataset(conn: psycopg.Connection, cfg: DatasetConfig) -> int:
-    """Create the dataset and its classes if needed. The class codes and their
-    order are the model's output order, so they must match what is stored."""
-    conn.execute(
-        "INSERT INTO datasets (name) VALUES (%s) ON CONFLICT (name) DO NOTHING", (cfg.name,)
-    )
-    (dataset_id,) = conn.execute("SELECT id FROM datasets WHERE name = %s", (cfg.name,)).fetchone()
+    """Create the dataset and its classes if needed; update its readable names.
+    The crop and the class codes and their order cannot change, because the
+    model's output order depends on them."""
+    (dataset_id, crop) = conn.execute(
+        "INSERT INTO datasets (name, crop_id, display_name, description)"
+        " SELECT %s, id, %s, %s FROM crops WHERE code = %s"
+        " ON CONFLICT (name) DO UPDATE"
+        " SET display_name = EXCLUDED.display_name, description = EXCLUDED.description"
+        " RETURNING id, (SELECT code FROM crops WHERE id = datasets.crop_id)",
+        (cfg.name, cfg.display_name, cfg.description, cfg.crop),
+    ).fetchone()
+    if crop != cfg.crop:
+        raise SeedError(
+            f"{cfg.name!r} belongs to crop {crop!r} in the database, {cfg.crop!r} in the config"
+        )
     stored = [
         code
         for (code,) in conn.execute(
@@ -315,15 +346,28 @@ def plan(cfg: DatasetConfig, source: Path) -> tuple[list[SourceImage], dict[str,
     return images, assign_splits(images, cfg.split)
 
 
+def check_crop(cfg: DatasetConfig, crops: CropsConfig) -> None:
+    if cfg.crop not in crops.codes:
+        raise SeedError(
+            f"unknown crop {cfg.crop!r} for {cfg.name!r}; crops are {sorted(crops.codes)}"
+        )
+
+
 def seed_dataset(
-    conn: psycopg.Connection, cfg: DatasetConfig, source: Path, store: ObjectStore
+    conn: psycopg.Connection,
+    cfg: DatasetConfig,
+    source: Path,
+    store: ObjectStore,
+    crops: CropsConfig,
 ) -> SeedReport:
     """Upload first, then record, so a row never points at a missing object.
-    Safe to re-run after a failure at any point."""
+    Safe to re-run after a failure at any point. Crops are upserted from
+    configs/crops.yaml; the dataset's crop must be one of them."""
+    check_crop(cfg, crops)
     images, splits = plan(cfg, source)
     report = SeedReport(dataset=cfg.name)
     _upload(images, cfg.name, store, report)
-    _record(conn, cfg, images, splits, report)
+    _record(conn, cfg, crops, images, splits, report)
     return report
 
 

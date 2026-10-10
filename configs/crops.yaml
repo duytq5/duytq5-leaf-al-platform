@@ -1,0 +1,8 @@
+# Crops (plants) the app shows. `al seed` upserts them by code: a new code adds
+# a crop, an existing one only gets display_name and description updated.
+# code: machine name (configs, API); display_name: what app users read.
+crops:
+  - code: coffee
+    display_name: Cà phê
+  - code: durian
+    display_name: Sầu riêng

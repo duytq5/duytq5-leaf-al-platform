@@ -70,6 +70,8 @@ uv run al seed configs/datasets/rocole.yaml <image-dir> --bucket <data-bucket>
 config. The seed uploads each image to `raw/<dataset>/<sha256>.jpg`, then records
 it with a split that is stratified per class and fixed by the split seed.
 Re-running it skips what is already there, and an image keeps its first split.
+The dataset config names its crop (`crop: coffee`); the seed adds or renames the
+crops listed in `configs/crops.yaml` and fails on an unknown crop code.
 Train images become the AL pool (`unlabeled`), with their ground truth only in
 `oracle_labels`. Val and test images are `labeled` and can never enter the pool
 (a database constraint enforces it). The seed also creates dataset version v0 (the seed labels),

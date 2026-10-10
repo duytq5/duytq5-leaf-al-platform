@@ -7,7 +7,7 @@ from pathlib import Path
 from pydantic import ValidationError
 
 from common.config import TrainConfig
-from common.dataset import DatasetConfig
+from common.dataset import CropsConfig, DatasetConfig
 from common.round import RoundConfig
 from selection import describe_strategies, from_config
 
@@ -59,10 +59,12 @@ def _print_split(counts: dict) -> None:
 
 def cmd_seed(args: argparse.Namespace) -> int:
     """Upload a dataset to raw/ and record it with a fixed split (retry-safe)."""
-    from db.seed import SeedError, plan, split_counts
+    from db.seed import SeedError, check_crop, plan, split_counts
 
     try:
         cfg = DatasetConfig.from_yaml(args.config)
+        crops = CropsConfig.from_yaml(args.crops)
+        check_crop(cfg, crops)
         if args.dry_run:
             images, splits = plan(cfg, Path(args.source))
             print(f"dry run: {len(images)} images for {cfg.name}, classes {cfg.codes}")
@@ -77,7 +79,7 @@ def cmd_seed(args: argparse.Namespace) -> int:
         from db.seed import S3Store, seed_dataset
 
         with connect() as conn:
-            report = seed_dataset(conn, cfg, Path(args.source), S3Store(bucket))
+            report = seed_dataset(conn, cfg, Path(args.source), S3Store(bucket), crops)
     except (OSError, ValidationError, SeedError) as e:
         print(e)
         return 1
@@ -110,6 +112,9 @@ def main(argv: list[str] | None = None) -> int:
     seed.add_argument("config", help="configs/datasets/<name>.yaml")
     seed.add_argument("source", help="folder with one sub-folder of JPEGs per label")
     seed.add_argument("--bucket", help="data bucket (default: $DATA_BUCKET)")
+    seed.add_argument(
+        "--crops", default="configs/crops.yaml", help="crop list (default: configs/crops.yaml)"
+    )
     seed.add_argument(
         "--dry-run", action="store_true", help="show the split; no upload, no database"
     )

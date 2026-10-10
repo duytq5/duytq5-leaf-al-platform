@@ -2,6 +2,7 @@
 
 POST /v1/captures                     -> CaptureRequest / CaptureResponse
 GET  /v1/devices/config?dataset={name} -> DeviceConfig
+GET  /v1/crops                        -> CropsResponse
 
 The uploader (user_sub) is taken from the Cognito JWT, never from the body.
 Retrying a capture with the same capture_id and body must return the same
@@ -14,7 +15,7 @@ from uuid import UUID
 
 from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, HttpUrl, model_validator
 
-from common.types import ClassCode, DatasetName, Probability, Sha256
+from common.types import ClassCode, CropCode, DatasetName, Probability, Sha256
 
 MAX_UPLOAD_BYTES = 10 * 1024 * 1024
 PROBS_SUM_TOLERANCE = 0.01
@@ -87,3 +88,24 @@ class DeviceConfig(_Strict):
     manifest_url: HttpUrl
     model_url: HttpUrl
     expires_in: int = Field(gt=0)
+
+
+class CropDataset(_Strict):
+    """A dataset (model) of a crop that has a released model."""
+
+    name: DatasetName  # pass to GET /v1/devices/config?dataset=
+    display_name: str
+    version: int = Field(ge=1)  # current release; the app always gets this one
+
+
+class Crop(_Strict):
+    code: CropCode
+    display_name: str
+    description: str | None = None
+    datasets: list[CropDataset] = Field(min_length=1)  # crops without a release are left out
+
+
+class CropsResponse(_Strict):
+    """Public list of crops and their released datasets, sorted by display_name."""
+
+    crops: list[Crop]

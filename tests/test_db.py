@@ -7,7 +7,7 @@ import psycopg
 import pytest
 from psycopg.types.json import Jsonb
 
-from common.dataset import DatasetConfig
+from common.dataset import CropsConfig, DatasetConfig
 from db import connect
 from db.migrate import migrate, migration_files
 from db.seed import SeedError, seed_dataset
@@ -26,9 +26,13 @@ CLASS_A = (
 
 CFG = DatasetConfig(
     name="toy",
+    crop="plant",
+    display_name="Toy leaves",
     classes=[{"code": "a", "display_name": "Class A"}, {"code": "b", "display_name": "Class B"}],
     split={"val": 0.2, "test": 0.2, "seed": 3},
 )
+
+CROPS = CropsConfig(crops=[{"code": "plant", "display_name": "Plant"}])
 
 
 class FakeStore:
@@ -60,7 +64,7 @@ def test_migrate_is_idempotent(pg_url):
 def test_seed_end_to_end(conn, tmp_path):
     src = make_folder(tmp_path, {"a": 20, "b": 10})
     store = FakeStore()
-    report = seed_dataset(conn, CFG, src, store)
+    report = seed_dataset(conn, CFG, src, store, CROPS)
 
     assert report.uploaded == 30 and report.new_rows == 30
     assert all(k.startswith("raw/toy/") and k.endswith(".jpg") for k in store.objects)
@@ -101,10 +105,10 @@ def test_seed_end_to_end(conn, tmp_path):
 def test_seed_rerun_is_a_noop(conn, tmp_path):
     src = make_folder(tmp_path, {"a": 20, "b": 10})
     store = FakeStore()
-    seed_dataset(conn, CFG, src, store)
+    seed_dataset(conn, CFG, src, store, CROPS)
     before = conn.execute("SELECT id, split, status FROM images ORDER BY id").fetchall()
 
-    report = seed_dataset(conn, CFG, src, store)
+    report = seed_dataset(conn, CFG, src, store, CROPS)
     assert report.uploaded == 0 and report.already_in_s3 == 30
     assert report.new_rows == 0 and report.existing_rows == 30
     assert store.puts == 30
@@ -114,34 +118,69 @@ def test_seed_rerun_is_a_noop(conn, tmp_path):
 
 def test_seed_keeps_first_split_when_images_are_added(conn, tmp_path):
     src = make_folder(tmp_path, {"a": 20, "b": 10})
-    seed_dataset(conn, CFG, src, FakeStore())
+    seed_dataset(conn, CFG, src, FakeStore(), CROPS)
     first = dict(conn.execute("SELECT sha256, split FROM images").fetchall())
 
     make_folder(tmp_path, {"a": 7}, start=20)
-    seed_dataset(conn, CFG, src, FakeStore())
+    seed_dataset(conn, CFG, src, FakeStore(), CROPS)
     after = dict(conn.execute("SELECT sha256, split FROM images").fetchall())
     assert len(after) == 37
     assert {s: after[s] for s in first} == first
 
 
 def test_seed_refuses_a_changed_label_list(conn, tmp_path):
-    seed_dataset(conn, CFG, make_folder(tmp_path, {"a": 5, "b": 5}), FakeStore())
+    seed_dataset(conn, CFG, make_folder(tmp_path, {"a": 5, "b": 5}), FakeStore(), CROPS)
     reordered = CFG.model_copy(update={"classes": list(reversed(CFG.classes))})
     with pytest.raises(SeedError, match="cannot change"):
-        seed_dataset(conn, reordered, tmp_path, FakeStore())
+        seed_dataset(conn, reordered, tmp_path, FakeStore(), CROPS)
 
 
 def test_seed_refuses_a_changed_ground_truth(conn, tmp_path):
-    seed_dataset(conn, CFG, make_folder(tmp_path / "v1", {"a": 5, "b": 5}), FakeStore())
+    seed_dataset(conn, CFG, make_folder(tmp_path / "v1", {"a": 5, "b": 5}), FakeStore(), CROPS)
     v2 = make_folder(tmp_path / "v2", {"a": 4}, start=1)
     make_folder(v2, {"b": 5})
     (tmp_path / "v1" / "a" / "0.jpg").rename(v2 / "b" / "moved.jpg")
     with pytest.raises(SeedError, match="different label"):
-        seed_dataset(conn, CFG, v2, FakeStore())
+        seed_dataset(conn, CFG, v2, FakeStore(), CROPS)
+
+
+def test_seed_upserts_crops_and_checks_the_dataset_crop(conn, tmp_path):
+    src = make_folder(tmp_path, {"a": 5, "b": 5})
+    two = CropsConfig(
+        crops=[{"code": "plant", "display_name": "Plant"}, {"code": "tree", "display_name": "Tree"}]
+    )
+    seed_dataset(conn, CFG, src, FakeStore(), two)
+    renamed = CropsConfig(
+        crops=[{"code": "plant", "display_name": "Cây", "description": "renamed"}]
+    )
+    seed_dataset(conn, CFG.model_copy(update={"display_name": "Lá"}), src, FakeStore(), renamed)
+    assert conn.execute(
+        "SELECT code, display_name, description FROM crops ORDER BY code"
+    ).fetchall() == [
+        ("plant", "Cây", "renamed"),
+        ("tree", "Tree", None),
+    ]
+    row = conn.execute(
+        "SELECT c.code, d.display_name FROM datasets d JOIN crops c ON c.id = d.crop_id"
+    ).fetchall()
+    assert row == [("plant", "Lá")]
+
+    store = FakeStore()
+    with pytest.raises(SeedError, match="unknown crop"):
+        seed_dataset(conn, CFG.model_copy(update={"crop": "vine"}), src, store, two)
+    assert store.puts == 0  # refused before any upload
+    with pytest.raises(SeedError, match="belongs to crop"):
+        seed_dataset(conn, CFG.model_copy(update={"crop": "tree"}), src, FakeStore(), two)
 
 
 def _image(conn, split: str, status: str, sha: str = "0" * 64) -> None:
-    conn.execute("INSERT INTO datasets (name) VALUES ('toy') ON CONFLICT DO NOTHING")
+    conn.execute(
+        "INSERT INTO crops (code, display_name) VALUES ('plant', 'Plant') ON CONFLICT DO NOTHING"
+    )
+    conn.execute(
+        "INSERT INTO datasets (name, crop_id, display_name)"
+        " SELECT 'toy', id, 'Toy' FROM crops WHERE code = 'plant' ON CONFLICT DO NOTHING"
+    )
     conn.execute(
         "INSERT INTO classes (dataset_id, code, position, display_name)"
         " SELECT d.id, c.code, c.pos, upper(c.code) FROM datasets d,"
@@ -238,6 +277,7 @@ def test_every_table_has_an_id_primary_key(conn):
     assert dict(rows) == {
         t: "id"
         for t in (
+            "crops",
             "datasets",
             "classes",
             "images",
@@ -256,7 +296,12 @@ def test_every_table_has_an_id_primary_key(conn):
 def test_natural_keys_stay_unique(conn):
     _image(conn, "train", "unlabeled")
     with pytest.raises(psycopg.errors.UniqueViolation):
-        conn.execute("INSERT INTO datasets (name) VALUES ('toy')")
+        conn.execute(
+            "INSERT INTO datasets (name, crop_id, display_name)"
+            " SELECT 'toy', id, 'Again' FROM crops WHERE code = 'plant'"
+        )
+    with pytest.raises(psycopg.errors.UniqueViolation):
+        conn.execute("INSERT INTO crops (code, display_name) VALUES ('plant', 'Again')")
     with pytest.raises(psycopg.errors.UniqueViolation):
         conn.execute(
             "INSERT INTO classes (dataset_id, code, position, display_name)"
@@ -351,7 +396,7 @@ def _next_version(conn, parent: int, round_id) -> int:
 
 
 def test_versions_keep_strategies_and_rollbacks_apart(conn, tmp_path):
-    seed_dataset(conn, CFG, make_folder(tmp_path, {"a": 20, "b": 10}), FakeStore())
+    seed_dataset(conn, CFG, make_folder(tmp_path, {"a": 20, "b": 10}), FakeStore(), CROPS)
     v0 = _v0(conn)
     train = [r[0] for r in conn.execute("SELECT id FROM images WHERE split = 'train' ORDER BY id")]
 
@@ -423,11 +468,11 @@ def test_only_v0_has_no_parent(conn):
 
 
 def test_seed_refuses_to_change_v0_once_a_round_used_it(conn, tmp_path):
-    seed_dataset(conn, CFG, make_folder(tmp_path, {"a": 20, "b": 10}), FakeStore())
+    seed_dataset(conn, CFG, make_folder(tmp_path, {"a": 20, "b": 10}), FakeStore(), CROPS)
     _round(conn)
     make_folder(tmp_path, {"a": 10}, start=20)
     with pytest.raises(SeedError, match="trained on v0"):
-        seed_dataset(conn, CFG, tmp_path, FakeStore())
+        seed_dataset(conn, CFG, tmp_path, FakeStore(), CROPS)
 
 
 def _model(conn, round_id, mlflow_version: int = 1) -> int:

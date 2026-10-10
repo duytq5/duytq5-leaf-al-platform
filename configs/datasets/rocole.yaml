@@ -3,6 +3,9 @@
 # The class order is the model's output order; never reorder after seeding.
 # code: machine name (code, model, manifest, API); display_name: what people read.
 name: rocole
+crop: coffee  # a code from configs/crops.yaml
+display_name: Lá cà phê (RoCoLe)
+description: Robusta coffee leaf images (RoCoLe dataset)
 classes:
   - {code: healthy, display_name: Healthy}
   - {code: red_spider_mite, display_name: Red spider mite}

@@ -6,8 +6,16 @@ and consumers validate against the same schema.
 """
 
 from common.config import TrainConfig
-from common.dataset import ClassConfig, DatasetConfig, SplitConfig
-from common.edge import CaptureRequest, CaptureResponse, CaptureStatus, DeviceConfig
+from common.dataset import ClassConfig, CropConfig, CropsConfig, DatasetConfig, SplitConfig
+from common.edge import (
+    CaptureRequest,
+    CaptureResponse,
+    CaptureStatus,
+    Crop,
+    CropDataset,
+    CropsResponse,
+    DeviceConfig,
+)
 from common.jobs import ExportJob, JobMessage, JobType, ScoreJob, TrainJob, parse_job
 from common.manifest import ModelManifest
 from common.round import RoundConfig, SelectionConfig
@@ -18,6 +26,11 @@ __all__ = [
     "CaptureResponse",
     "CaptureStatus",
     "ClassConfig",
+    "Crop",
+    "CropConfig",
+    "CropDataset",
+    "CropsConfig",
+    "CropsResponse",
     "DatasetConfig",
     "DeviceConfig",
     "ExportJob",

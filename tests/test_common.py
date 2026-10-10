@@ -8,6 +8,7 @@ from pydantic import ValidationError
 from common import (
     CaptureRequest,
     CaptureResponse,
+    CropsResponse,
     DeviceConfig,
     ExportJob,
     ModelManifest,
@@ -222,6 +223,25 @@ def test_device_config_from_doc_example():
     assert DeviceConfig.model_validate(doc).version == 13
     with pytest.raises(ValidationError):
         DeviceConfig.model_validate(doc | {"manifest": {}})
+
+
+def test_crops_response_from_doc_example():
+    doc = {
+        "crops": [
+            {
+                "code": "coffee",
+                "display_name": "Cà phê",
+                "description": None,
+                "datasets": [
+                    {"name": "rocole", "display_name": "Lá cà phê (RoCoLe)", "version": 3}
+                ],
+            }
+        ]
+    }
+    assert CropsResponse.model_validate(doc).crops[0].datasets[0].version == 3
+    doc["crops"][0]["datasets"] = []  # a crop without a released dataset is left out
+    with pytest.raises(ValidationError):
+        CropsResponse.model_validate(doc)
 
 
 def _manifest() -> dict:

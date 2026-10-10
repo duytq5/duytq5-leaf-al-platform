@@ -1,4 +1,7 @@
-"""Per-dataset settings: the one class list and the fixed train/val/test split.
+"""Crop and dataset settings read by the seed script.
+
+configs/crops.yaml lists the crops (plants) the app shows. A dataset belongs
+to one crop and has one class list and a fixed train/val/test split.
 
 configs/datasets/<name>.yaml is read by the seed script, which stores the
 classes in the `classes` table. A class has a machine `code` (used by code,
@@ -12,7 +15,38 @@ from typing import Self
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from common.types import ClassCode, DatasetName
+from common.types import ClassCode, CropCode, DatasetName
+
+
+class CropConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    code: CropCode
+    display_name: str = Field(min_length=1)
+    description: str | None = None
+
+
+class CropsConfig(BaseModel):
+    """configs/crops.yaml. The seed upserts every crop by code."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    crops: list[CropConfig] = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def _unique_codes(self) -> Self:
+        if len({c.code for c in self.crops}) != len(self.crops):
+            raise ValueError("crop codes must be unique")
+        return self
+
+    @property
+    def codes(self) -> set[str]:
+        return {c.code for c in self.crops}
+
+    @classmethod
+    def from_yaml(cls, path: str | Path) -> "CropsConfig":
+        with open(path, encoding="utf-8") as f:
+            return cls.model_validate(yaml.safe_load(f))
 
 
 class SplitConfig(BaseModel):
@@ -41,6 +75,9 @@ class DatasetConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     name: DatasetName
+    crop: CropCode
+    display_name: str = Field(min_length=1)
+    description: str | None = None
     classes: list[ClassConfig] = Field(min_length=2)  # in model output order
     split: SplitConfig
 
