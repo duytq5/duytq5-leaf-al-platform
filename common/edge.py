@@ -1,10 +1,11 @@
 """Edge API request and response bodies.
 
-POST /v1/captures     -> CaptureRequest / CaptureResponse
-GET  /v1/devices/config -> DeviceConfig
+POST /v1/captures                     -> CaptureRequest / CaptureResponse
+GET  /v1/devices/config?dataset={name} -> DeviceConfig
 
-device_id is taken from the Cognito JWT, never from the body. Retrying a
-capture with the same capture_id must return the same response.
+The uploader (user_sub) is taken from the Cognito JWT, never from the body.
+Retrying a capture with the same capture_id and body must return the same
+response.
 """
 
 from enum import StrEnum
@@ -13,10 +14,10 @@ from uuid import UUID
 
 from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, HttpUrl, model_validator
 
-from common.manifest import ModelManifest
-from common.types import DatasetName, Probability, Sha256
+from common.types import ClassCode, DatasetName, Probability, Sha256
 
-MAX_UPLOAD_BYTES = 20 * 1024 * 1024
+MAX_UPLOAD_BYTES = 10 * 1024 * 1024
+PROBS_SUM_TOLERANCE = 0.01
 
 
 class _Strict(BaseModel):
@@ -25,20 +26,21 @@ class _Strict(BaseModel):
 
 class ImageInfo(_Strict):
     sha256: Sha256
-    content_type: Literal["image/jpeg"]
+    content_type: Literal["image/jpeg", "image/png"]
     size: int = Field(gt=0, le=MAX_UPLOAD_BYTES)
 
 
 class Inference(_Strict):
+    """The on-device prediction. The Edge API computes top1 and confidence
+    from probs and checks the keys against the model version's classes."""
+
     model_version: str  # e.g. "leaf-disease/12"
-    top1: str
-    confidence: Probability
-    probs: dict[str, Probability]
+    probs: dict[ClassCode, Probability] = Field(min_length=2)
 
     @model_validator(mode="after")
-    def _top1_in_probs(self) -> Self:
-        if self.top1 not in self.probs:
-            raise ValueError("top1 must be one of the keys in probs")
+    def _probs_sum_to_one(self) -> Self:
+        if abs(sum(self.probs.values()) - 1) > PROBS_SUM_TOLERANCE:
+            raise ValueError(f"probs must sum to 1 (±{PROBS_SUM_TOLERANCE})")
         return self
 
 
@@ -58,6 +60,7 @@ class CaptureStatus(StrEnum):
 class UploadInstruction(_Strict):
     url: HttpUrl
     method: Literal["PUT"] = "PUT"
+    headers: dict[str, str] = {}  # e.g. Content-Type; the PUT must send them
     expires_in: int = Field(gt=0)
 
 
@@ -75,10 +78,12 @@ class CaptureResponse(_Strict):
 
 
 class DeviceConfig(_Strict):
-    """Current champion model and where to download it."""
+    """Current champion model of one dataset and where to download it."""
 
+    dataset: DatasetName
     model: str
     version: int = Field(ge=1)
-    download_url: HttpUrl
+    sha256: Sha256  # of the ONNX file
+    manifest_url: HttpUrl
+    model_url: HttpUrl
     expires_in: int = Field(gt=0)
-    manifest: ModelManifest

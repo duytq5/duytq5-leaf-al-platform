@@ -8,6 +8,7 @@ from pydantic import ValidationError
 from common import (
     CaptureRequest,
     CaptureResponse,
+    DeviceConfig,
     ExportJob,
     ModelManifest,
     ScoreJob,
@@ -118,8 +119,6 @@ def _capture() -> dict:
         "image": {"sha256": SHA, "content_type": "image/jpeg", "size": 842113},
         "inference": {
             "model_version": "leaf-disease/12",
-            "top1": "leaf_blight",
-            "confidence": 0.54,
             "probs": {"healthy": 0.31, "leaf_blight": 0.54, "algal_spot": 0.15},
         },
     }
@@ -127,7 +126,10 @@ def _capture() -> dict:
 
 def test_capture_request_from_doc_example():
     req = CaptureRequest.model_validate(_capture())
-    assert req.inference.top1 == "leaf_blight"
+    assert req.inference.probs["leaf_blight"] == 0.54
+    png = _capture()
+    png["image"]["content_type"] = "image/png"
+    CaptureRequest.model_validate(png)
 
 
 @pytest.mark.parametrize(
@@ -135,9 +137,14 @@ def test_capture_request_from_doc_example():
     [
         lambda c: c.update(captured_at="2026-09-29T08:12:00"),  # no timezone
         lambda c: c["image"].update(sha256="XYZ"),
-        lambda c: c["inference"].update(top1="rust"),  # not in probs
-        lambda c: c["inference"].update(confidence=1.5),
-        lambda c: c.update(device_id="phone-1"),  # comes from the JWT, not the body
+        lambda c: c["inference"].update(top1="leaf_blight"),  # computed by the server
+        lambda c: c["inference"].update(confidence=0.54),  # computed by the server
+        lambda c: c["inference"]["probs"].update(healthy=0.5),  # sum is 1.19
+        lambda c: c["inference"].update(probs={"healthy": 1.0}),  # one class
+        lambda c: c["inference"]["probs"].update({"Leaf Blight": 0.0}),  # not a class code
+        lambda c: c["image"].update(size=10 * 1024 * 1024 + 1),
+        lambda c: c["image"].update(content_type="image/heic"),
+        lambda c: c.update(user_sub="someone"),  # comes from the JWT, not the body
     ],
 )
 def test_capture_request_rejects_bad_input(mutate):
@@ -149,7 +156,11 @@ def test_capture_request_rejects_bad_input(mutate):
 
 def test_capture_response_upload_matches_status():
     cid = str(uuid4())
-    upload = {"url": "https://s3.example.com/put", "expires_in": 900}
+    upload = {
+        "url": "https://s3.example.com/put",
+        "headers": {"Content-Type": "image/jpeg"},
+        "expires_in": 900,
+    }
     ok = {"capture_id": cid, "status": "upload_required", "upload": upload}
     CaptureResponse.model_validate(ok)
     CaptureResponse.model_validate({"capture_id": cid, "status": "already_exists"})
@@ -157,6 +168,21 @@ def test_capture_response_upload_matches_status():
         CaptureResponse.model_validate({"capture_id": cid, "status": "upload_required"})
     with pytest.raises(ValidationError):
         CaptureResponse.model_validate(ok | {"status": "already_exists"})
+
+
+def test_device_config_from_doc_example():
+    doc = {
+        "dataset": "durian",
+        "model": "leaf-disease",
+        "version": 13,
+        "sha256": SHA,
+        "manifest_url": "https://s3.example.com/manifest.json",
+        "model_url": "https://s3.example.com/model.onnx",
+        "expires_in": 900,
+    }
+    assert DeviceConfig.model_validate(doc).version == 13
+    with pytest.raises(ValidationError):
+        DeviceConfig.model_validate(doc | {"manifest": {}})
 
 
 def _manifest() -> dict:

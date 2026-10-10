@@ -259,9 +259,9 @@ def test_natural_keys_stay_unique(conn):
         conn.execute(oracle, (image_id,))
     model = _model(conn, _round(conn))
     capture = (
-        "INSERT INTO captures (capture_id, dataset_id, sha256, device_id, user_sub,"
+        "INSERT INTO captures (capture_id, dataset_id, sha256, user_sub,"
         " model_version_id, top1_class_id, confidence, probs, captured_at)"
-        f" SELECT %s, id, %s, 'dev', 'user-sub', %s, {CLASS_A}, 0.6,"
+        f" SELECT %s, id, %s, 'user-sub', %s, {CLASS_A}, 0.6,"
         """ '{"a": 0.6, "b": 0.4}', now()"""
         " FROM datasets WHERE name = 'toy'"
         " ON CONFLICT (capture_id) DO NOTHING"

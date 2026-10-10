@@ -213,9 +213,10 @@ CREATE TABLE captures (
     image_id       bigint REFERENCES images (id),
     dataset_id     bigint NOT NULL REFERENCES datasets (id),
     sha256         text NOT NULL CHECK (sha256 ~ '^[0-9a-f]{64}$'),
-    device_id      text NOT NULL,
     user_sub       text NOT NULL,  -- uploader's Cognito sub from the JWT, never from the body
     model_version_id bigint NOT NULL REFERENCES model_versions (id),  -- the on-device model
+    -- top1 and confidence are computed by the Edge API from probs; the app
+    -- does not send them.
     top1_class_id  bigint NOT NULL REFERENCES classes (id),
     confidence     real NOT NULL CHECK (confidence BETWEEN 0 AND 1),
     probs          jsonb NOT NULL,  -- keyed by class code
