@@ -6,9 +6,9 @@ stored as model_versions.labels): one {code, display_name} per output index,
 in output order, so the app can show readable names.
 """
 
-from typing import Literal
+from typing import Annotated, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import AfterValidator, BaseModel, ConfigDict, Field
 
 from common.types import ClassCode, Sha256
 
@@ -28,6 +28,16 @@ class ModelClass(BaseModel):
     display_name: str = Field(min_length=1)
 
 
+def _unique_codes(v: list[ModelClass]) -> list[ModelClass]:
+    if len({c.code for c in v}) != len(v):
+        raise ValueError("class codes must be unique")
+    return v
+
+
+# The class snapshot: one entry per model output index, in output order.
+ClassList = Annotated[list[ModelClass], Field(min_length=2), AfterValidator(_unique_codes)]
+
+
 class ModelManifest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -37,11 +47,4 @@ class ModelManifest(BaseModel):
     sha256: Sha256
     size_bytes: int = Field(gt=0)
     preprocess: Preprocess
-    labels: list[ModelClass] = Field(min_length=2)  # index = model output index
-
-    @field_validator("labels")
-    @classmethod
-    def _unique_codes(cls, v: list[ModelClass]) -> list[ModelClass]:
-        if len({c.code for c in v}) != len(v):
-            raise ValueError("class codes must be unique")
-        return v
+    labels: ClassList  # index = model output index

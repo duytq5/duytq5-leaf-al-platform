@@ -82,7 +82,10 @@ CREATE TABLE rounds (
     status           text NOT NULL DEFAULT 'pending'
                      CHECK (status IN ('pending', 'running', 'succeeded', 'failed', 'cancelled')),
     metrics          jsonb,
+    -- Rounds start when a round config merges to main. id is
+    -- uuid5(commit_sha + config path), so a re-run workflow cannot start it twice.
     started_by       text NOT NULL,  -- GitHub login that merged the round-config PR
+    commit_sha       text NOT NULL CHECK (commit_sha ~ '^[0-9a-f]{40}$'),
     -- Production mode (Phase 2): the Label Studio project for this round and
     -- the task token its webhook resumes.
     label_task_token text,
@@ -194,7 +197,10 @@ CREATE TABLE model_releases (
     model_version_id  bigint NOT NULL REFERENCES model_versions (id),
     action            text NOT NULL CHECK (action IN ('promote', 'rollback')),
     released_by       text NOT NULL,  -- GitHub login that merged the release PR
-    released_at       timestamptz NOT NULL DEFAULT now()
+    commit_sha        text NOT NULL CHECK (commit_sha ~ '^[0-9a-f]{40}$'),
+    released_at       timestamptz NOT NULL DEFAULT now(),
+    -- One release per version per commit, so a retried record step inserts nothing.
+    UNIQUE (model_version_id, commit_sha)
 );
 CREATE INDEX model_releases_latest_idx ON model_releases (released_at DESC, id DESC);
 CREATE TRIGGER model_releases_append_only

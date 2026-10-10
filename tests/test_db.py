@@ -16,6 +16,8 @@ from tests.test_seed import make_folder
 
 SNAPSHOT = [{"code": "a", "display_name": "Class A"}, {"code": "b", "display_name": "Class B"}]
 
+COMMIT = "c" * 40
+
 # The 'a' class of the toy dataset, for raw SQL in tests.
 CLASS_A = (
     "(SELECT c.id FROM classes c JOIN datasets d ON d.id = c.dataset_id"
@@ -178,12 +180,25 @@ def _round(conn, status: str = "pending", base: int | None = None) -> uuid.UUID:
     rid = uuid.uuid4()
     conn.execute(
         "INSERT INTO rounds (id, dataset_id, base_version_id, mode, strategy, k, seed, status,"
-        " started_by)"
-        " SELECT %s, id, %s, 'simulation', 'random', 10, 42, %s, 'owner' FROM datasets"
+        " started_by, commit_sha)"
+        " SELECT %s, id, %s, 'simulation', 'random', 10, 42, %s, 'owner', %s FROM datasets"
         " WHERE name = 'toy'",
-        (rid, base or _v0(conn), status),
+        (rid, base or _v0(conn), status, COMMIT),
     )
     return rid
+
+
+def test_commit_sha_must_be_a_full_git_sha(conn):
+    _image(conn, "train", "unlabeled")
+    model = _model(conn, _round(conn))
+    with pytest.raises(psycopg.errors.CheckViolation):
+        conn.execute(
+            "INSERT INTO model_releases (model_version_id, action, released_by, commit_sha)"
+            " VALUES (%s, 'promote', 'owner', 'abc1234')",
+            (model,),
+        )
+    with pytest.raises(psycopg.errors.CheckViolation):
+        conn.execute("UPDATE rounds SET commit_sha = 'main'")
 
 
 def test_one_active_round_per_dataset(conn):
@@ -447,12 +462,15 @@ def test_latest_release_is_the_champion_and_releases_are_append_only(conn):
     m1 = _model(conn, first, 1)
     m2 = _model(conn, _round(conn), 2)
     release = (
-        "INSERT INTO model_releases (model_version_id, action, released_by)"
-        " VALUES (%s, %s, 'owner')"
+        "INSERT INTO model_releases (model_version_id, action, released_by, commit_sha)"
+        " VALUES (%s, %s, 'owner', %s)"
+        " ON CONFLICT (model_version_id, commit_sha) DO NOTHING"
     )
-    conn.execute(release, (m1, "promote"))
-    conn.execute(release, (m2, "promote"))
-    conn.execute(release, (m1, "rollback"))
+    conn.execute(release, (m1, "promote", "1" * 40))
+    conn.execute(release, (m2, "promote", "2" * 40))
+    conn.execute(release, (m2, "promote", "2" * 40))  # retried record step: no new row
+    conn.execute(release, (m1, "rollback", "3" * 40))  # same version, new commit
+    assert conn.execute("SELECT count(*) FROM model_releases").fetchone() == (3,)
     champion = conn.execute(
         "SELECT r.model_version_id FROM model_releases r"
         " JOIN model_versions m ON m.id = r.model_version_id"

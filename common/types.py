@@ -1,3 +1,4 @@
+import re
 from enum import StrEnum
 from typing import Annotated
 
@@ -8,6 +9,13 @@ DatasetName = Annotated[str, StringConstraints(pattern=r"^[a-z0-9][a-z0-9_-]*$",
 Probability = Annotated[float, Field(ge=0.0, le=1.0)]
 # Machine name of a class (classes.code): used by code, the model, manifests and payloads.
 ClassCode = Annotated[str, StringConstraints(pattern=r"^[a-z0-9][a-z0-9_]*$", max_length=64)]
+# Full Git commit SHA of the merge to main that started a round or a release.
+CommitSha = Annotated[str, StringConstraints(pattern=r"^[0-9a-f]{40}$")]
+# Worker image GitHub Actions built for that commit; every job runs in it.
+WORKER_IMAGE_REPO = "ghcr.io/duytq5/duytq5-leaf-al-platform-worker"
+WorkerImage = Annotated[
+    str, StringConstraints(pattern="^" + re.escape(WORKER_IMAGE_REPO) + ":[0-9a-f]{40}$")
+]
 
 
 class ImageStatus(StrEnum):

@@ -39,71 +39,110 @@ def test_config_rejects_unknown_keys():
         TrainConfig.model_validate(bad)
 
 
-def test_parse_train_job_round_trip():
-    msg = {
+IMAGE = "ghcr.io/duytq5/duytq5-leaf-al-platform-worker:" + "b" * 40
+CLASSES = [
+    {"code": "healthy", "display_name": "Healthy"},
+    {"code": "rust", "display_name": "Coffee leaf rust"},
+]
+
+
+def _job(type_: str, spec: dict, **extra) -> dict:
+    return {
         "job_id": str(uuid4()),
-        "type": "train",
+        "type": type_,
+        "image": IMAGE,
         "task_token": "tok",
-        "round_id": str(uuid4()),
-        "spec": {
-            "config": _config_dict(),
-            "manifest_uri": "s3://al-data/manifests/durian/v7.parquet",
-        },
+        "spec": spec,
+    } | extra
+
+
+def _train() -> dict:
+    spec = {
+        "config": _config_dict(),
+        "manifest_uri": "s3://al-data/manifests/durian/v7.parquet",
+        "classes": CLASSES,
     }
-    job = parse_job(json.dumps(msg))
+    return _job("train", spec, round_id=str(uuid4()))
+
+
+def _export() -> dict:
+    spec = {
+        "model_uri": "models:/leaf-disease/3",
+        "output_prefix": "edge/leaf-disease/3/",
+        "labels": CLASSES,
+    }
+    return _job("export", spec)
+
+
+def test_parse_train_job_round_trip():
+    job = parse_job(json.dumps(_train()))
     assert isinstance(job, TrainJob)
+    assert [c.code for c in job.spec.classes] == ["healthy", "rust"]
     assert parse_job(job.model_dump_json()) == job
 
 
 def test_parse_score_job_defaults_to_probs():
-    msg = {
-        "job_id": str(uuid4()),
-        "type": "score",
-        "task_token": "tok",
-        "round_id": str(uuid4()),
-        "spec": {
-            "model_uri": "models:/leaf-disease/3",
-            "pool_manifest_uri": "s3://x/p.parquet",
-            "output_uri": "s3://x/scores/r/pool.parquet",
-        },
+    spec = {
+        "model_uri": "models:/leaf-disease/3",
+        "pool_manifest_uri": "s3://x/p.parquet",
+        "output_uri": "s3://x/scores/r/pool.parquet",
     }
-    job = parse_job(json.dumps(msg))
+    job = parse_job(json.dumps(_job("score", spec, round_id=str(uuid4()))))
     assert isinstance(job, ScoreJob)
     assert job.spec.outputs == {"probs"}
 
 
 def test_score_job_requires_probs():
-    msg = {
-        "job_id": str(uuid4()),
-        "type": "score",
-        "task_token": "tok",
-        "round_id": str(uuid4()),
-        "spec": {
-            "model_uri": "m",
-            "pool_manifest_uri": "p",
-            "output_uri": "o",
-            "outputs": ["embeddings"],
-        },
+    spec = {
+        "model_uri": "m",
+        "pool_manifest_uri": "p",
+        "output_uri": "o",
+        "outputs": ["embeddings"],
     }
     with pytest.raises(ValidationError):
-        parse_job(json.dumps(msg))
+        parse_job(json.dumps(_job("score", spec, round_id=str(uuid4()))))
 
 
-def test_train_job_requires_task_token_but_export_does_not():
-    train = {
-        "job_id": str(uuid4()),
-        "type": "train",
-        "round_id": str(uuid4()),
-        "spec": {"config": _config_dict(), "manifest_uri": "s3://x"},
-    }
+def test_parse_export_job():
+    job = parse_job(json.dumps(_export()))
+    assert isinstance(job, ExportJob)
+    assert job.round_id is None
+    assert job.spec.labels[1].display_name == "Coffee leaf rust"
+
+
+@pytest.mark.parametrize("make", [_train, _export])
+@pytest.mark.parametrize(
+    "mutate",
+    [
+        lambda j: j.pop("task_token"),  # every job resumes a state machine
+        lambda j: j.pop("image"),
+        lambda j: j.update(image=IMAGE.replace("b" * 40, "latest")),  # must pin a commit
+        lambda j: j.update(image="docker.io/someone/worker:" + "b" * 40),
+    ],
+)
+def test_jobs_need_a_task_token_and_a_pinned_worker_image(make, mutate):
+    job = make()
+    mutate(job)
     with pytest.raises(ValidationError):
-        parse_job(json.dumps(train))
-    export = {
-        "job_id": str(uuid4()),
-        "type": "export",
-        "spec": {"model_uri": "models:/leaf-disease/3", "output_prefix": "edge/leaf-disease/3/"},
-    }
-    assert isinstance(parse_job(json.dumps(export)), ExportJob)
+        parse_job(json.dumps(job))
+
+
+@pytest.mark.parametrize(
+    "classes",
+    [CLASSES[:1], [CLASSES[0], CLASSES[0]]],  # one class; duplicate codes
+)
+def test_job_class_lists_are_validated(classes):
+    train, export = _train(), _export()
+    train["spec"]["classes"] = classes
+    export["spec"]["labels"] = classes
+    for job in (train, export):
+        with pytest.raises(ValidationError):
+            parse_job(json.dumps(job))
+
+
+def test_export_job_has_no_round():
+    with pytest.raises(ValidationError):
+        parse_job(json.dumps(_export() | {"round_id": str(uuid4())}))
 
 
 def test_unknown_job_type_rejected():
