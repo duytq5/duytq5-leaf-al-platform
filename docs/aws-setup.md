@@ -9,7 +9,7 @@ Set these once per shell:
 
 ```bash
 export AWS_PROFILE=<your-profile>
-export AWS_REGION=ap-southeast-1          # pick one region and keep it
+export AWS_REGION=ap-southeast-2          # the project region; keep it
 export CDK_DEFAULT_REGION=$AWS_REGION
 export CDK_DEFAULT_ACCOUNT=$(aws sts get-caller-identity --query Account --output text)
 export MY_IP=$(curl -s https://checkip.amazonaws.com)/32
