@@ -134,12 +134,30 @@ aws ec2 describe-instances --instance-ids <InstanceId> \
 
 MLflow is then at `http://<public-ip>:5000` from your IP.
 
-Stop the instance when not in use (the volume keeps all data):
+### Daily start and stop
+
+EC2 is the only part of the stack that costs money while idle, so stop the
+instance when you are not working. The disks keep all data and Postgres and
+MLflow start again on boot (`restart: unless-stopped`). Use the script, with
+`AWS_PROFILE` and `AWS_REGION` set as above:
 
 ```bash
-aws ec2 stop-instances  --instance-ids <InstanceId>
-aws ec2 start-instances --instance-ids <InstanceId>
+scripts/ec2.sh start             # waits until running, prints the new MLflow URL
+scripts/ec2.sh stop              # backs up Postgres to S3 first, then stops
+scripts/ec2.sh stop --no-backup  # skip the backup
+scripts/ec2.sh status            # state and public IP
+scripts/ec2.sh backup            # backup only
+scripts/ec2.sh shell             # Session Manager shell
 ```
+
+`stop` runs the backup because the nightly cron backup only runs while the
+instance is on. If the backup fails, the instance is left running. The backup
+runs through SSM Run Command, so the repo must be cloned at
+`/home/ec2-user/duytq5-leaf-al-platform` with `.env` written (step above).
+
+While it is stopped, nothing that needs Postgres or MLflow can run; jobs sent
+to SQS wait in the queue. Do not `cdk destroy` to save money day to day: the
+next deploy creates new, empty buckets and a new data volume.
 
 Postgres opens to the Lambdas (which run outside a VPC) only once it has TLS
 and a strong password, in the database schema PR.
