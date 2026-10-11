@@ -5,10 +5,71 @@ is deployed automatically; you run these commands yourself, from your own
 machine with your own AWS profile. Sections marked *(later in Phase 1)* need
 resources the CDK stack does not create yet.
 
+## 0. Local AWS access and the Agent Toolkit (once per machine)
+
+Sign in with `aws login` on your own machine only. Never put AWS credentials in
+a cloud session or in this repo. The profile used here is `leaf-al`.
+
+**AWS CLI.** `aws login` and `aws configure agent-toolkit` need a recent AWS
+CLI v2 (2.32 is too old for the toolkit). Install or update it:
+
+```bash
+curl -fsSL 'https://awscli.amazonaws.com/v2/install.sh' | bash   # installs to ~/.local/bin
+echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.zshrc           # once
+hash -r                                                          # or open a new terminal
+aws --version
+```
+
+On macOS an older install may sit in `/usr/local/bin`. If `aws --version`
+still shows the old version, the shell has cached that path: run `hash -r` or
+open a new terminal. AWS's `.pkg` installer
+(`https://awscli.amazonaws.com/AWSCLIV2.pkg`) updates `/usr/local/bin` instead.
+
+**Sign in and check:**
+
+```bash
+aws configure set region ap-southeast-2 --profile leaf-al
+aws login --region ap-southeast-2 --profile leaf-al     # browser sign-in
+aws sts get-caller-identity --profile leaf-al
+```
+
+The sign-in lasts 12 hours and renews for up to 90 days without the browser.
+
+**Agent Toolkit** (AWS skills and the AWS MCP server for Claude Code and other
+AI tools). The toolkit service runs only in `us-east-1`, whatever the project
+region:
+
+```bash
+aws configure agent-toolkit --yes --region us-east-1 --profile leaf-al
+aws agent-toolkit list-available-skills --region us-east-1 --profile leaf-al   # check
+```
+
+The wizard adds an `aws-mcp` entry to each tool's MCP config (for Claude Code,
+`~/.claude.json`). That entry uses the `default` profile, so add this to each
+`aws-mcp` entry and restart the tool, or the server fails with
+`JSON-RPC error: -32602`:
+
+```json
+"env": { "AWS_MCP_PROXY_PROFILES": "leaf-al" }
+```
+
+For another account later: `aws login --profile <name>`, add the name to the
+space-separated `AWS_MCP_PROXY_PROFILES` list, restart the tool.
+
+| Error | Fix |
+| --- | --- |
+| `Found invalid choice 'agent-toolkit'` | The old CLI is still being run. `hash -r` or a new terminal, then `aws --version`. |
+| `--yes` not recognized | Run the wizard without `--yes`. |
+| `Unable to locate credentials` / `ExpiredToken` | Run `aws login --profile leaf-al` again. |
+| `command not found: aws` | `export PATH="$HOME/.local/bin:$PATH"` |
+
+The project's rules still apply when an AI tool has AWS access: you deploy, and
+nothing creates AWS resources unless you ask for it.
+
 Set these once per shell:
 
 ```bash
-export AWS_PROFILE=<your-profile>
+export AWS_PROFILE=leaf-al
 export AWS_REGION=ap-southeast-2          # the project region; keep it
 export CDK_DEFAULT_REGION=$AWS_REGION
 export CDK_DEFAULT_ACCOUNT=$(aws sts get-caller-identity --query Account --output text)
@@ -137,12 +198,32 @@ MLflow is then at `http://localhost:5000`. For Postgres, run a second session
 with `portNumber=5432,localPortNumber=5432` and connect to `localhost:5432`.
 The instance ID stays the same when the instance stops and starts.
 
-Stop the instance when not in use (the volume keeps all data):
+### Daily start and stop
+
+EC2 is the only part of the stack that costs money while idle, so stop the
+instance when you are not working. The disks keep all data and Postgres and
+MLflow start again on boot (`restart: unless-stopped`). Use the script, with
+`AWS_PROFILE` and `AWS_REGION` set as above:
 
 ```bash
-aws ec2 stop-instances  --instance-ids <InstanceId>
-aws ec2 start-instances --instance-ids <InstanceId>
+scripts/ec2.sh start             # waits until running
+scripts/ec2.sh stop              # backs up Postgres to S3 first, then stops
+scripts/ec2.sh stop --no-backup  # skip the backup
+scripts/ec2.sh status            # instance state
+scripts/ec2.sh backup            # backup only
+scripts/ec2.sh tunnel            # MLflow on localhost:5000 (Ctrl-C to close)
+scripts/ec2.sh tunnel postgres   # Postgres on localhost:5432
+scripts/ec2.sh shell             # Session Manager shell
 ```
+
+`stop` runs the backup because the nightly cron backup only runs while the
+instance is on. If the backup fails, the instance is left running. The backup
+runs through SSM Run Command, so the repo must be cloned at
+`/home/ec2-user/duytq5-leaf-al-platform` with `.env` written (step above).
+
+While it is stopped, nothing that needs Postgres or MLflow can run; jobs sent
+to SQS wait in the queue. Do not `cdk destroy` to save money day to day: the
+next deploy creates new, empty buckets and a new data volume.
 
 The tunnel is for you and the worker. The PR that adds the first Lambda that
 needs Postgres also decides how that Lambda reaches it.
