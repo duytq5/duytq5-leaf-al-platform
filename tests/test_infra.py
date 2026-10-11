@@ -15,9 +15,6 @@ from infra.stacks.platform import (
     PlatformStack,
 )
 
-ADMIN = "203.0.113.7/32"
-WORKER = "198.51.100.9/32"
-
 
 def _template(**context) -> Template:
     app = cdk.App(context=context)
@@ -26,7 +23,7 @@ def _template(**context) -> Template:
 
 @pytest.fixture(scope="module")
 def full() -> Template:
-    return _template(adminCidr=ADMIN, workerCidr=WORKER, budgetEmail="owner@example.com")
+    return _template(budgetEmail="owner@example.com")
 
 
 @pytest.fixture(scope="module")
@@ -141,27 +138,32 @@ def test_no_access_key_in_template(full):
     full.resource_count_is("AWS::IAM::User", 1)
 
 
-def test_security_group_only_admin_and_worker(full):
+def test_security_group_has_no_inbound(full):
     (sg,) = full.find_resources("AWS::EC2::SecurityGroup").values()
-    ingress = sg["Properties"]["SecurityGroupIngress"]
-    assert {(r["CidrIp"], r["FromPort"]) for r in ingress} == {
-        (ADMIN, 5000),
-        (ADMIN, 5432),
-        (WORKER, 5000),
-        (WORKER, 5432),
-    }
-    assert all(r["FromPort"] == r["ToPort"] for r in ingress)
+    assert "SecurityGroupIngress" not in sg["Properties"]
+    full.resource_count_is("AWS::EC2::SecurityGroupIngress", 0)
 
 
-def test_security_group_closed_without_admin_cidr(bare):
-    (sg,) = bare.find_resources("AWS::EC2::SecurityGroup").values()
+def test_old_cidr_context_is_ignored():
+    template = _template(adminCidr="203.0.113.7/32", workerCidr="198.51.100.9/32")
+    (sg,) = template.find_resources("AWS::EC2::SecurityGroup").values()
     assert "SecurityGroupIngress" not in sg["Properties"]
 
 
-@pytest.mark.parametrize("cidr", ["0.0.0.0/0", "not-an-ip", "10.0.0.1/24"])
-def test_bad_admin_cidr_rejected(cidr):
-    with pytest.raises(ValueError):
-        _template(adminCidr=cidr)
+def test_worker_can_only_port_forward_to_host(full):
+    statements = _statements(full, "WorkerUserDefaultPolicy")
+    (tunnel,) = [s for s in statements if s.get("Sid") == "TunnelToHost"]
+    assert _actions(tunnel) == ["ssm:StartSession"]
+    assert tunnel["Condition"] == {"BoolIfExists": {"ssm:SessionDocumentAccessCheck": "true"}}
+    resources = json.dumps(tunnel["Resource"])
+    assert ':instance/", {"Ref": "Host' in resources  # this one instance only
+    assert "document/AWS-StartPortForwardingSession" in resources
+    assert "SSM-SessionManagerRunShell" not in resources
+    (own,) = [s for s in statements if s.get("Sid") == "ManageOwnSessions"]
+    assert "session/${aws:username}-*" in json.dumps(own["Resource"])
+    # Shell commands on the host stay with the owner.
+    actions = {a for s in statements for a in _actions(s)}
+    assert "ssm:SendCommand" not in actions
 
 
 def test_data_volume_retained_and_attached(full):

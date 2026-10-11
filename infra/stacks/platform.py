@@ -5,16 +5,16 @@ SQS job queue + DLQ, the worker's IAM user, the EC2 host with its retained data
 volume, SSM parameters for non-secret settings, and the Budget alert. Later
 Phase 1 PRs add the al-round state machine, Lambdas and Cognito here.
 
+The EC2 host has no inbound ports. The owner and the worker reach MLflow (5000)
+and Postgres (5432) through SSM Session Manager port forwarding, so access
+depends on IAM, not on an IP address.
+
 Deploy-time settings come from CDK context (`cdk deploy -c key=value`):
-  adminCidr     your IP as a /32; opens MLflow (5000) and Postgres (5432) to it
-  workerCidr    the GPU worker's IP if it differs from adminCidr (optional)
   budgetEmail   where the Budget alert goes; no Budget is created without it
   budgetUsd     monthly budget in USD (default 20)
   instanceType  EC2 instance type (default t3.small)
   dataVolumeGb  size of the /data EBS volume (default 20)
 """
-
-import ipaddress
 
 from aws_cdk import (
     Acknowledgment,
@@ -45,6 +45,8 @@ SSM_POSTGRES_PASSWORD = f"{SSM_PREFIX}/postgres/password"
 
 MLFLOW_PORT = 5000
 POSTGRES_PORT = 5432
+# AWS-managed Session Manager document for local port forwarding.
+PORT_FORWARDING_DOCUMENT = "AWS-StartPortForwardingSession"
 
 # Long enough for the worker to pick a job up; it extends visibility while a
 # job runs (ChangeMessageVisibility), so a crashed job reappears in 30 minutes.
@@ -58,23 +60,19 @@ DOCKER_COMPOSE_VERSION = "v2.29.7"
 DOCKER_BUILDX_VERSION = "v0.17.1"
 
 
-def _cidr(value: str | None, key: str) -> str | None:
-    if not value:
-        return None
-    net = ipaddress.ip_network(value, strict=True)
-    if net.prefixlen == 0:
-        raise ValueError(f"{key} must not be open to the whole internet: {value}")
-    return str(net)
-
-
 class PlatformStack(Stack):
     def __init__(self, scope: Construct, construct_id: str, **kwargs) -> None:
         super().__init__(scope, construct_id, **kwargs)
         Tags.of(self).add("project", "leaf-al-platform")
 
         ctx = self.node.try_get_context
-        admin_cidr = _cidr(ctx("adminCidr"), "adminCidr")
-        worker_cidr = _cidr(ctx("workerCidr"), "workerCidr")
+        for removed in ("adminCidr", "workerCidr"):
+            if ctx(removed):
+                Annotations.of(self).add_warning_v2(
+                    f"leaf-al:{removed}-ignored",
+                    f"{removed} is ignored: the host has no inbound ports. "
+                    "Use SSM port forwarding (docs/aws-setup.md).",
+                )
 
         self.data_bucket = self._bucket("DataBucket", versioned=False)
         self.models_bucket = self._bucket("ModelsBucket", versioned=True)
@@ -106,7 +104,7 @@ class PlatformStack(Stack):
 
         self._parameters()
         self.worker_user = self._worker_user()
-        self._ec2_host(admin_cidr, worker_cidr)
+        self._ec2_host()
         self._budget(ctx("budgetEmail"), float(ctx("budgetUsd") or 20))
 
         CfnOutput(self, "DataBucketName", value=self.data_bucket.bucket_name)
@@ -239,7 +237,7 @@ class PlatformStack(Stack):
         )
         return user
 
-    def _ec2_host(self, admin_cidr: str | None, worker_cidr: str | None) -> None:
+    def _ec2_host(self) -> None:
         """One instance running Postgres + MLflow (docker-compose), with all
         state on a separate EBS volume that is kept when the instance or the
         stack is deleted."""
@@ -254,26 +252,16 @@ class PlatformStack(Stack):
             ],
         )
 
+        # No inbound rules at all, not even SSH. The owner and the worker use
+        # SSM Session Manager (shell and port forwarding), which goes out from
+        # the SSM agent, so the instance needs only outbound access.
         sg = ec2.SecurityGroup(
             self,
             "HostSg",
             vpc=vpc,
-            description="leaf-al EC2: MLflow and Postgres from the owner and worker only",
+            description="leaf-al EC2: no inbound, access through SSM Session Manager",
             allow_all_outbound=True,
         )
-        # No SSH: the owner connects with SSM Session Manager.
-        # Postgres requires TLS (deploy/ec2/postgres/pg_hba.conf); it opens to
-        # the Lambdas in the PR that adds the first one that needs it.
-        sources = {c for c in (admin_cidr, worker_cidr) if c}
-        for cidr in sorted(sources):
-            sg.add_ingress_rule(ec2.Peer.ipv4(cidr), ec2.Port.tcp(MLFLOW_PORT), "MLflow")
-            sg.add_ingress_rule(ec2.Peer.ipv4(cidr), ec2.Port.tcp(POSTGRES_PORT), "Postgres")
-        if not sources:
-            Annotations.of(self).add_warning_v2(
-                "leaf-al:no-admin-cidr",
-                "adminCidr not set: MLflow and Postgres accept no inbound traffic. "
-                "Deploy with -c adminCidr=<your-ip>/32.",
-            )
 
         role = iam.Role(
             self,
@@ -373,9 +361,44 @@ class PlatformStack(Stack):
         )
 
         user_data.add_commands(*_host_setup_commands(volume.volume_id))
+        self._worker_tunnel(instance)
 
         CfnOutput(self, "InstanceId", value=instance.instance_id)
         CfnOutput(self, "DataVolumeId", value=volume.volume_id)
+
+    def _worker_tunnel(self, instance: ec2.Instance) -> None:
+        """Let the worker open SSM port-forwarding sessions to the host (MLflow,
+        Postgres), and nothing else: no shell, no other instance."""
+        instance_arn = self.format_arn(
+            service="ec2", resource="instance", resource_name=instance.instance_id
+        )
+        port_forwarding = self.format_arn(
+            service="ssm",
+            account="",
+            resource="document",
+            resource_name=PORT_FORWARDING_DOCUMENT,
+        )
+        self.worker_user.add_to_policy(
+            iam.PolicyStatement(
+                sid="TunnelToHost",
+                actions=["ssm:StartSession"],
+                resources=[instance_arn, port_forwarding],
+                # Without this, StartSession on the instance also allows the
+                # default shell document.
+                conditions={"BoolIfExists": {"ssm:SessionDocumentAccessCheck": "true"}},
+            )
+        )
+        self.worker_user.add_to_policy(
+            iam.PolicyStatement(
+                sid="ManageOwnSessions",
+                actions=["ssm:TerminateSession", "ssm:ResumeSession"],
+                resources=[
+                    self.format_arn(
+                        service="ssm", resource="session", resource_name="${aws:username}-*"
+                    )
+                ],
+            )
+        )
 
     def _budget(self, email: str | None, amount_usd: float) -> None:
         if not email:
