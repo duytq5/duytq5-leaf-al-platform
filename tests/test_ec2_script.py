@@ -13,7 +13,7 @@ echo "$*" >> "$AWS_LOG"
 case "$1 $2" in
   "cloudformation describe-stacks") echo i-0abc ;;
   "ec2 describe-instances")
-    case "$*" in *State.Name*) echo "$STUB_STATE" ;; *) echo 203.0.113.7 ;; esac ;;
+    echo "$STUB_STATE" ;;
   "ssm send-command") echo cmd-1 ;;
   "ssm get-command-invocation")
     case "$*" in *"--query Status"*) echo "$STUB_BACKUP" ;; *) echo "backed up" ;; esac ;;
@@ -49,12 +49,27 @@ def test_unknown_command_prints_usage_without_calling_aws(tmp_path):
     assert calls == []
 
 
-def test_start_waits_and_prints_mlflow_url(tmp_path):
+def test_start_waits_until_running(tmp_path):
     proc, calls = run(tmp_path, "start")
     assert proc.returncode == 0, proc.stderr
     assert any(c.startswith("ec2 start-instances --instance-ids i-0abc") for c in calls)
     assert any(c.startswith("ec2 wait instance-running") for c in calls)
-    assert "http://203.0.113.7:5000" in proc.stdout
+    assert "tunnel" in proc.stdout
+
+
+def test_tunnel_forwards_mlflow_by_default(tmp_path):
+    proc, calls = run(tmp_path, "tunnel")
+    assert proc.returncode == 0, proc.stderr
+    assert calls[-1] == (
+        "ssm start-session --target i-0abc --document-name AWS-StartPortForwardingSession"
+        " --parameters portNumber=5000,localPortNumber=5000"
+    )
+
+
+def test_tunnel_postgres(tmp_path):
+    proc, calls = run(tmp_path, "tunnel", "postgres")
+    assert proc.returncode == 0, proc.stderr
+    assert calls[-1].endswith("portNumber=5432,localPortNumber=5432")
 
 
 def test_stop_backs_up_before_stopping(tmp_path):

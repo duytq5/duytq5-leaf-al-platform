@@ -2,11 +2,14 @@
 # Start and stop the platform's EC2 host (Postgres + MLflow) to save cost.
 # Run from your own machine with your AWS profile; see docs/aws-setup.md.
 #
-#   scripts/ec2.sh start          start the instance, wait, print the MLflow URL
+#   scripts/ec2.sh start          start the instance and wait until it runs
 #   scripts/ec2.sh stop           back up Postgres to S3, then stop the instance
 #   scripts/ec2.sh stop --no-backup
 #   scripts/ec2.sh backup         back up Postgres to S3 (instance must be running)
-#   scripts/ec2.sh status         instance state and public IP
+#   scripts/ec2.sh status         instance state
+#   scripts/ec2.sh tunnel         MLflow on localhost:5000 via SSM (Ctrl-C closes)
+#   scripts/ec2.sh tunnel postgres
+#                                 Postgres on localhost:5432 via SSM
 #   scripts/ec2.sh shell          open a Session Manager shell on the instance
 #
 # Uses AWS_PROFILE and AWS_REGION from the environment. Set INSTANCE_ID to skip
@@ -16,9 +19,10 @@ set -euo pipefail
 STACK=LeafAlPlatform
 REPO_DIR=/home/ec2-user/duytq5-leaf-al-platform
 MLFLOW_PORT=5000
+POSTGRES_PORT=5432
 
 usage() {
-  sed -n '2,13p' "$0" | sed 's/^# \{0,1\}//'
+  sed -n '2,16p' "$0" | sed 's/^# \{0,1\}//'
   exit "${1:-0}"
 }
 
@@ -34,11 +38,6 @@ instance_id() {
 state() {
   aws ec2 describe-instances --instance-ids "$1" \
     --query 'Reservations[0].Instances[0].State.Name' --output text
-}
-
-public_ip() {
-  aws ec2 describe-instances --instance-ids "$1" \
-    --query 'Reservations[0].Instances[0].PublicIpAddress' --output text
 }
 
 backup() {
@@ -64,7 +63,7 @@ backup() {
 cmd=${1:-}
 case "$cmd" in
   -h | --help | help) usage 0 ;;
-  start | stop | backup | status | shell) ;;
+  start | stop | backup | status | tunnel | shell) ;;
   *) usage 1 >&2 ;;
 esac
 
@@ -79,9 +78,8 @@ case "$cmd" in
     aws ec2 start-instances --instance-ids "$id" >/dev/null
     echo "Starting $id..."
     aws ec2 wait instance-running --instance-ids "$id"
-    ip=$(public_ip "$id")
-    echo "Running. Public IP: $ip (changes on every start)"
-    echo "MLflow: http://$ip:$MLFLOW_PORT (Postgres and MLflow take a minute to come up)"
+    echo "Running. Postgres and MLflow take a minute to come up."
+    echo "Open MLflow with: $0 tunnel"
     ;;
   stop)
     if [ "${2:-}" != "--no-backup" ] && [ "$(state "$id")" = "running" ]; then
@@ -99,7 +97,18 @@ case "$cmd" in
     backup "$id"
     ;;
   status)
-    echo "$id: $(state "$id"), public IP $(public_ip "$id")"
+    echo "$id: $(state "$id")"
+    ;;
+  tunnel)
+    case "${2:-mlflow}" in
+      mlflow) port=$MLFLOW_PORT ;;
+      postgres) port=$POSTGRES_PORT ;;
+      *) usage 1 >&2 ;;
+    esac
+    echo "Forwarding localhost:$port to the instance. Ctrl-C to close."
+    exec aws ssm start-session --target "$id" \
+      --document-name AWS-StartPortForwardingSession \
+      --parameters "portNumber=$port,localPortNumber=$port"
     ;;
   shell)
     exec aws ssm start-session --target "$id"
