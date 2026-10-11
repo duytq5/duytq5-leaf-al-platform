@@ -9,10 +9,9 @@ Set these once per shell:
 
 ```bash
 export AWS_PROFILE=<your-profile>
-export AWS_REGION=ap-southeast-1          # pick one region and keep it
+export AWS_REGION=ap-southeast-2          # the project region; keep it
 export CDK_DEFAULT_REGION=$AWS_REGION
 export CDK_DEFAULT_ACCOUNT=$(aws sts get-caller-identity --query Account --output text)
-export MY_IP=$(curl -s https://checkip.amazonaws.com)/32
 ```
 
 ## What the stack creates
@@ -24,10 +23,10 @@ export MY_IP=$(curl -s https://checkip.amazonaws.com)/32
 | S3 data bucket (`al-data`) | Private, SSE-S3, HTTPS only. `backups/` objects expire after 30 days. Kept on `cdk destroy`. |
 | S3 models bucket (`al-models`) | Same, plus versioning (old versions expire after 90 days). Kept on `cdk destroy`. |
 | SQS job queue + dead-letter queue | 20 s long polling, 30 min visibility, 14-day retention, a job goes to the DLQ after 3 failed receives. |
-| IAM user for the GPU worker | Consume jobs, report Step Functions task results, read `raw/` and `manifests/`, write `scores/`, read/write `mlflow-artifacts/`. No access key: you create it (section 4). |
+| IAM user for the GPU worker | SSM port forwarding to the host only (no shell), consume jobs, report Step Functions task results, read `raw/` and `manifests/`, write `scores/`, read/write `mlflow-artifacts/`. No access key: you create it (section 4). |
 | VPC + EC2 instance | One public subnet, no NAT gateway. Amazon Linux 2023, `t3.small`, IMDSv2, no SSH key: connect with Session Manager. Docker, compose and cron installed on first boot. |
 | EBS data volume (`/data`) | gp3 20 GB, encrypted, mounted at `/data` on first boot. Kept when the instance or the stack is deleted. |
-| Security group | MLflow (5000) and Postgres (5432) open only to `adminCidr` and `workerCidr`. Nothing else inbound. |
+| Security group | No inbound rules. You and the worker reach MLflow (5000) and Postgres (5432) through SSM port forwarding (section 3). |
 | SSM parameters | `/leaf-al/buckets/data`, `/leaf-al/buckets/models`, `/leaf-al/queues/jobs-url`. |
 | AWS Budget | Monthly cost budget, email at 80 % actual and 100 % forecast. Only created when `budgetEmail` is set. |
 
@@ -35,8 +34,6 @@ Deploy-time settings are CDK context values (`-c key=value`):
 
 | Key | Default | Meaning |
 | --- | --- | --- |
-| `adminCidr` | none (no inbound access) | Your IP as `/32` |
-| `workerCidr` | none | The GPU worker's IP, if it is not the same as `adminCidr` |
 | `budgetEmail` | none (no Budget) | Where Budget alerts go |
 | `budgetUsd` | `20` | Monthly budget in USD |
 | `instanceType` | `t3.small` | EC2 instance type (x86_64) |
@@ -62,14 +59,14 @@ uv sync --extra infra
 source .venv/bin/activate
 npx aws-cdk bootstrap "aws://$CDK_DEFAULT_ACCOUNT/$AWS_REGION"   # once per account/region
 
-CTX="-c adminCidr=$MY_IP -c budgetEmail=<your-email> -c budgetUsd=20"
+CTX="-c budgetEmail=<your-email> -c budgetUsd=20"
 npx aws-cdk diff   LeafAlPlatform $CTX                           # review what will change
 npx aws-cdk deploy LeafAlPlatform $CTX
 ```
 
-Use the same `-c` values on every deploy. A deploy without `adminCidr` closes
-MLflow and Postgres again; a deploy without `budgetEmail` deletes the Budget.
-If your home IP changes, re-run the deploy with the new `MY_IP`.
+Use the same `-c` values on every deploy. A deploy without `budgetEmail`
+deletes the Budget. The stack ignores the old `adminCidr` and `workerCidr`
+settings: no IP address gets inbound access.
 
 If you already created a budget named `leaf-al-monthly` by hand (the earlier
 version of this doc did), delete it first, or the deploy fails on the name:
@@ -124,15 +121,21 @@ AWS_REGION=<region> ./write-env.sh     # writes .env from SSM, mode 600
 docker compose up -d --build
 ```
 
-The instance's public IP changes every time it starts (no Elastic IP, to save
-its hourly charge). Get the current one with:
+### Reach MLflow and Postgres (SSM tunnel)
+
+The host has no inbound ports. Open a tunnel with Session Manager port
+forwarding instead. It works from any network, and CloudTrail logs each session.
+Keep the command running while you use the tunnel:
 
 ```bash
-aws ec2 describe-instances --instance-ids <InstanceId> \
-  --query 'Reservations[0].Instances[0].PublicIpAddress' --output text
+aws ssm start-session --target <InstanceId> \
+  --document-name AWS-StartPortForwardingSession \
+  --parameters portNumber=5000,localPortNumber=5000
 ```
 
-MLflow is then at `http://<public-ip>:5000` from your IP.
+MLflow is then at `http://localhost:5000`. For Postgres, run a second session
+with `portNumber=5432,localPortNumber=5432` and connect to `localhost:5432`.
+The instance ID stays the same when the instance stops and starts.
 
 Stop the instance when not in use (the volume keeps all data):
 
@@ -141,8 +144,8 @@ aws ec2 stop-instances  --instance-ids <InstanceId>
 aws ec2 start-instances --instance-ids <InstanceId>
 ```
 
-Postgres opens to the Lambdas (which run outside a VPC) only once it has TLS
-and a strong password, in the database schema PR.
+The tunnel is for you and the worker. The PR that adds the first Lambda that
+needs Postgres also decides how that Lambda reaches it.
 
 ## 4. Worker credentials (on the RTX 5070 machine)
 
@@ -158,8 +161,11 @@ aws configure --profile leaf-al-worker     # paste the key id and secret, same r
 To rotate: create a second key, switch the worker to it, then
 `aws iam delete-access-key --user-name <WorkerUserName> --access-key-id <old-id>`.
 
-If the worker runs from a different IP than you, add `-c workerCidr=<its-ip>/32`
-to the deploy so it can reach MLflow.
+The worker reaches MLflow through the same tunnel. Install the Session Manager
+plugin on the GPU machine and run the port-forwarding command from section 3
+with `--profile leaf-al-worker`. Then set `MLFLOW_TRACKING_URI=http://localhost:5000`.
+The worker user can open port-forwarding sessions to this one instance only. It
+cannot open a shell.
 
 ## 5. Persistent data volume
 
