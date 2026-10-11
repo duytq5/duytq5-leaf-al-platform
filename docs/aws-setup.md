@@ -5,10 +5,71 @@ is deployed automatically; you run these commands yourself, from your own
 machine with your own AWS profile. Sections marked *(later in Phase 1)* need
 resources the CDK stack does not create yet.
 
+## 0. Local AWS access and the Agent Toolkit (once per machine)
+
+Sign in with `aws login` on your own machine only. Never put AWS credentials in
+a cloud session or in this repo. The profile used here is `leaf-al`.
+
+**AWS CLI.** `aws login` and `aws configure agent-toolkit` need a recent AWS
+CLI v2 (2.32 is too old for the toolkit). Install or update it:
+
+```bash
+curl -fsSL 'https://awscli.amazonaws.com/v2/install.sh' | bash   # installs to ~/.local/bin
+echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.zshrc           # once
+hash -r                                                          # or open a new terminal
+aws --version
+```
+
+On macOS an older install may sit in `/usr/local/bin`. If `aws --version`
+still shows the old version, the shell has cached that path: run `hash -r` or
+open a new terminal. AWS's `.pkg` installer
+(`https://awscli.amazonaws.com/AWSCLIV2.pkg`) updates `/usr/local/bin` instead.
+
+**Sign in and check:**
+
+```bash
+aws configure set region ap-southeast-2 --profile leaf-al
+aws login --region ap-southeast-2 --profile leaf-al     # browser sign-in
+aws sts get-caller-identity --profile leaf-al
+```
+
+The sign-in lasts 12 hours and renews for up to 90 days without the browser.
+
+**Agent Toolkit** (AWS skills and the AWS MCP server for Claude Code and other
+AI tools). The toolkit service runs only in `us-east-1`, whatever the project
+region:
+
+```bash
+aws configure agent-toolkit --yes --region us-east-1 --profile leaf-al
+aws agent-toolkit list-available-skills --region us-east-1 --profile leaf-al   # check
+```
+
+The wizard adds an `aws-mcp` entry to each tool's MCP config (for Claude Code,
+`~/.claude.json`). That entry uses the `default` profile, so add this to each
+`aws-mcp` entry and restart the tool, or the server fails with
+`JSON-RPC error: -32602`:
+
+```json
+"env": { "AWS_MCP_PROXY_PROFILES": "leaf-al" }
+```
+
+For another account later: `aws login --profile <name>`, add the name to the
+space-separated `AWS_MCP_PROXY_PROFILES` list, restart the tool.
+
+| Error | Fix |
+| --- | --- |
+| `Found invalid choice 'agent-toolkit'` | The old CLI is still being run. `hash -r` or a new terminal, then `aws --version`. |
+| `--yes` not recognized | Run the wizard without `--yes`. |
+| `Unable to locate credentials` / `ExpiredToken` | Run `aws login --profile leaf-al` again. |
+| `command not found: aws` | `export PATH="$HOME/.local/bin:$PATH"` |
+
+The project's rules still apply when an AI tool has AWS access: you deploy, and
+nothing creates AWS resources unless you ask for it.
+
 Set these once per shell:
 
 ```bash
-export AWS_PROFILE=<your-profile>
+export AWS_PROFILE=leaf-al
 export AWS_REGION=ap-southeast-2          # the project region; keep it
 export CDK_DEFAULT_REGION=$AWS_REGION
 export CDK_DEFAULT_ACCOUNT=$(aws sts get-caller-identity --query Account --output text)
