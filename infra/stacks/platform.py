@@ -12,7 +12,7 @@ depends on IAM, not on an IP address.
 Deploy-time settings come from CDK context (`cdk deploy -c key=value`):
   budgetEmail   where the Budget alert goes; no Budget is created without it
   budgetUsd     monthly budget in USD (default 20)
-  instanceType  EC2 instance type (default t3.small)
+  instanceType  EC2 instance type (default t3.medium)
   dataVolumeGb  size of the /data EBS volume (default 20)
 """
 
@@ -58,6 +58,8 @@ JOB_MAX_RECEIVES = 3
 AL2023_AMI_PARAM = "/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64"
 DOCKER_COMPOSE_VERSION = "v2.29.7"
 DOCKER_BUILDX_VERSION = "v0.17.1"
+REPO_URL = "https://github.com/duytq5/duytq5-leaf-al-platform.git"
+REPO_DIR = "/home/ec2-user/duytq5-leaf-al-platform"
 
 
 class PlatformStack(Stack):
@@ -319,7 +321,9 @@ class PlatformStack(Stack):
             "Host",
             vpc=vpc,
             vpc_subnets=ec2.SubnetSelection(subnets=[subnet]),
-            instance_type=ec2.InstanceType(self.node.try_get_context("instanceType") or "t3.small"),
+            instance_type=ec2.InstanceType(
+                self.node.try_get_context("instanceType") or "t3.medium"
+            ),
             # Resolved by EC2 at launch, not by CloudFormation at deploy: a new
             # AMI release never replaces the running instance on `cdk deploy`.
             machine_image=ec2.MachineImage.resolve_ssm_parameter_at_launch(AL2023_AMI_PARAM),
@@ -364,7 +368,7 @@ class PlatformStack(Stack):
             device="/dev/sdf",
         )
 
-        user_data.add_commands(*_host_setup_commands(volume.volume_id))
+        user_data.add_commands(*_host_setup_commands(volume.volume_id, self.region))
         self._worker_tunnel(instance)
 
         CfnOutput(self, "InstanceId", value=instance.instance_id)
@@ -439,9 +443,12 @@ class PlatformStack(Stack):
         )
 
 
-def _host_setup_commands(volume_id: str) -> list[str]:
-    """First-boot setup: Docker + compose, cron (nightly backup), and /data on
-    the retained volume.
+def _host_setup_commands(volume_id: str, region: str) -> list[str]:
+    """First-boot setup: Docker + compose, cron, 2 GB swap, /data on the retained volume,
+    then the app: clone the repo and run deploy/ec2/bootstrap.sh (Postgres +
+    MLflow + nightly backup). The Postgres password must already be in SSM
+    (docs/aws-setup.md section 1); if it is not, this fails and is logged in
+    /var/log/cloud-init-output.log. Run `scripts/ec2.sh setup` to retry.
 
     The volume is found by its id (Nitro exposes it as an NVMe device whose
     serial is the id), so the device name does not matter. It is formatted
@@ -459,6 +466,12 @@ def _host_setup_commands(volume_id: str) -> list[str]:
         f"curl -fsSL {gh}/buildx/releases/download/{DOCKER_BUILDX_VERSION}/"
         f"buildx-{DOCKER_BUILDX_VERSION}.linux-amd64 -o {plugins}/docker-buildx",
         f"chmod +x {plugins}/docker-compose {plugins}/docker-buildx",
+        # Swap as a safety net: on t3.small (2 GB) a crash-looping MLflow next to
+        # Postgres starved the host until the SSM agent stopped answering.
+        "if [ ! -f /swapfile ]; then dd if=/dev/zero of=/swapfile bs=1M count=2048 "
+        "&& chmod 600 /swapfile && mkswap /swapfile; fi",
+        "swapon /swapfile || true",
+        "grep -q '^/swapfile' /etc/fstab || echo '/swapfile none swap sw 0 0' >> /etc/fstab",
         "systemctl enable --now docker crond",
         "usermod -aG docker ec2-user",
         f"VOL={volume_id}",
@@ -470,4 +483,6 @@ def _host_setup_commands(volume_id: str) -> list[str]:
         "grep -q 'LABEL=leaf-al-data' /etc/fstab || "
         "echo 'LABEL=leaf-al-data /data ext4 defaults,nofail 0 2' >> /etc/fstab",
         "mount -a",
+        f"[ -d {REPO_DIR}/.git ] || sudo -u ec2-user git clone {REPO_URL} {REPO_DIR}",
+        f"sudo -u ec2-user env AWS_REGION={region} {REPO_DIR}/deploy/ec2/bootstrap.sh",
     ]

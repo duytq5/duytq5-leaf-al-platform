@@ -6,10 +6,14 @@
 #   scripts/ec2.sh stop           back up Postgres to S3, then stop the instance
 #   scripts/ec2.sh stop --no-backup
 #   scripts/ec2.sh backup         back up Postgres to S3 (instance must be running)
+#   scripts/ec2.sh setup          add 2 GB swap if missing, clone or reset to main on
+#                                 the host, run deploy/ec2/bootstrap.sh
 #   scripts/ec2.sh status         instance state
 #   scripts/ec2.sh tunnel         MLflow on localhost:5000 via SSM (Ctrl-C closes)
 #   scripts/ec2.sh tunnel postgres
 #                                 Postgres on localhost:5432 via SSM
+#   scripts/ec2.sh tunnel mlflow 5050
+#                                 another local port (macOS AirPlay uses 5000)
 #   scripts/ec2.sh shell          open a Session Manager shell on the instance
 #
 # Uses AWS_PROFILE and AWS_REGION from the environment. Set INSTANCE_ID to skip
@@ -18,11 +22,12 @@ set -euo pipefail
 
 STACK=LeafAlPlatform
 REPO_DIR=/home/ec2-user/duytq5-leaf-al-platform
+REPO_URL=https://github.com/duytq5/duytq5-leaf-al-platform.git
 MLFLOW_PORT=5000
 POSTGRES_PORT=5432
 
 usage() {
-  sed -n '2,16p' "$0" | sed 's/^# \{0,1\}//'
+  sed -n '2,20p' "$0" | sed 's/^# \{0,1\}//'
   exit "${1:-0}"
 }
 
@@ -40,30 +45,51 @@ state() {
     --query 'Reservations[0].Instances[0].State.Name' --output text
 }
 
-backup() {
-  local id=$1 cmd status
-  echo "Backing up Postgres to S3..."
+# Run shell commands on the host as root through SSM Run Command and print
+# their output. Arguments: a label, then one or more commands (no double quotes).
+run_on_host() {
+  local id=$1 label=$2 cmd status params
+  shift 2
+  params=$(printf '"%s",' "$@")
+  echo "$label..."
   cmd=$(aws ssm send-command --instance-ids "$id" \
     --document-name AWS-RunShellScript \
-    --comment "leaf-al postgres backup" \
-    --parameters "commands=[\"sudo -u ec2-user $REPO_DIR/deploy/ec2/backup-postgres.sh\"]" \
+    --comment "leaf-al $label" \
+    --parameters "commands=[${params%,}]" \
     --query 'Command.CommandId' --output text)
-  # The waiter exits non-zero on failure; read the result either way.
-  aws ssm wait command-executed --command-id "$cmd" --instance-id "$id" || true
-  status=$(aws ssm get-command-invocation --command-id "$cmd" --instance-id "$id" \
-    --query 'Status' --output text)
+  # Poll instead of `aws ssm wait`, which gives up after 100 s; a first
+  # `docker compose up --build` takes longer.
+  while :; do
+    status=$(aws ssm get-command-invocation --command-id "$cmd" --instance-id "$id" \
+      --query 'Status' --output text 2>/dev/null || echo Pending)
+    case "$status" in Pending | InProgress | Delayed) sleep 5 ;; *) break ;; esac
+  done
   aws ssm get-command-invocation --command-id "$cmd" --instance-id "$id" \
     --query '[StandardOutputContent, StandardErrorContent]' --output text
   if [ "$status" != "Success" ]; then
-    echo "Backup failed ($status)." >&2
+    echo "$label failed ($status)." >&2
     return 1
   fi
+}
+
+backup() {
+  run_on_host "$1" "Backing up Postgres to S3" \
+    "sudo -u ec2-user $REPO_DIR/deploy/ec2/backup-postgres.sh"
+}
+
+setup() {
+  run_on_host "$1" "Setting up swap, Postgres, MLflow and the nightly backup" \
+    "[ -f /swapfile ] || { dd if=/dev/zero of=/swapfile bs=1M count=2048 && chmod 600 /swapfile && mkswap /swapfile; }" \
+    "swapon --show | grep -q /swapfile || swapon /swapfile" \
+    "grep -q '^/swapfile' /etc/fstab || echo '/swapfile none swap sw 0 0' >> /etc/fstab" \
+    "if [ -d $REPO_DIR/.git ]; then sudo -u ec2-user git -C $REPO_DIR fetch -q origin main && sudo -u ec2-user git -C $REPO_DIR reset -q --hard origin/main; else sudo -u ec2-user git clone $REPO_URL $REPO_DIR; fi" \
+    "sudo -u ec2-user env AWS_REGION=${AWS_REGION:?set AWS_REGION} $REPO_DIR/deploy/ec2/bootstrap.sh"
 }
 
 cmd=${1:-}
 case "$cmd" in
   -h | --help | help) usage 0 ;;
-  start | stop | backup | status | tunnel | shell) ;;
+  start | stop | backup | setup | status | tunnel | shell) ;;
   *) usage 1 >&2 ;;
 esac
 
@@ -96,6 +122,9 @@ case "$cmd" in
   backup)
     backup "$id"
     ;;
+  setup)
+    setup "$id"
+    ;;
   status)
     echo "$id: $(state "$id")"
     ;;
@@ -105,10 +134,11 @@ case "$cmd" in
       postgres) port=$POSTGRES_PORT ;;
       *) usage 1 >&2 ;;
     esac
-    echo "Forwarding localhost:$port to the instance. Ctrl-C to close."
+    local_port=${3:-$port}
+    echo "Forwarding localhost:$local_port to port $port on the instance. Ctrl-C to close."
     exec aws ssm start-session --target "$id" \
       --document-name AWS-StartPortForwardingSession \
-      --parameters "portNumber=$port,localPortNumber=$port"
+      --parameters "portNumber=$port,localPortNumber=$local_port"
     ;;
   shell)
     exec aws ssm start-session --target "$id"

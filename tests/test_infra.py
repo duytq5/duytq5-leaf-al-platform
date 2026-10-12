@@ -201,13 +201,18 @@ def test_instance_no_ssh_imdsv2_ami_resolved_at_launch(full):
     props = instance["Properties"]
     assert "KeyName" not in props
     assert props["ImageId"].startswith("resolve:ssm:/aws/service/ami-amazon-linux-latest/al2023")
-    assert props["InstanceType"] == "t3.small"
+    assert props["InstanceType"] == "t3.medium"
     full.has_resource_properties(
         "AWS::EC2::LaunchTemplate",
         {"LaunchTemplateData": {"MetadataOptions": {"HttpTokens": "required"}}},
     )
     user_data = json.dumps(props["UserData"])
     assert "mkfs.ext4" in user_data and "blkid" in user_data  # format only blank volumes
+    assert "mkswap /swapfile" in user_data
+    # First boot also brings up the app, after /data is mounted.
+    assert user_data.index("mount -a") < user_data.index("deploy/ec2/bootstrap.sh")
+    assert "git clone https://github.com/duytq5/duytq5-leaf-al-platform.git" in user_data
+    assert "AWS_REGION=" in user_data and '{"Ref": "AWS::Region"}' in user_data
 
 
 def test_no_nat_gateway(full):
@@ -223,8 +228,8 @@ def test_budget_only_with_email(full, bare):
 
 
 def test_context_overrides():
-    t = _template(instanceType="t3.medium", dataVolumeGb="30", budgetEmail="a@b.c", budgetUsd="35")
-    t.has_resource_properties("AWS::EC2::Instance", {"InstanceType": "t3.medium"})
+    t = _template(instanceType="t3.large", dataVolumeGb="30", budgetEmail="a@b.c", budgetUsd="35")
+    t.has_resource_properties("AWS::EC2::Instance", {"InstanceType": "t3.large"})
     t.has_resource_properties("AWS::EC2::Volume", {"Size": 30})
     t.has_resource_properties(
         "AWS::Budgets::Budget", {"Budget": {"BudgetLimit": {"Amount": 35, "Unit": "USD"}}}

@@ -85,7 +85,7 @@ export CDK_DEFAULT_ACCOUNT=$(aws sts get-caller-identity --query Account --outpu
 | S3 models bucket (`al-models`) | Same, plus versioning (old versions expire after 90 days). Kept on `cdk destroy`. |
 | SQS job queue + dead-letter queue | 20 s long polling, 30 min visibility, 14-day retention, a job goes to the DLQ after 3 failed receives. |
 | IAM user for the GPU worker | SSM port forwarding to the host only (no shell), consume jobs, report Step Functions task results, read `raw/` and `manifests/`, write `scores/`, read/write `mlflow-artifacts/`. No access key: you create it (section 4). |
-| VPC + EC2 instance | One public subnet, no NAT gateway. Amazon Linux 2023, `t3.small`, IMDSv2, no SSH key: connect with Session Manager. Docker, compose and cron installed on first boot. |
+| VPC + EC2 instance | One public subnet, no NAT gateway. Amazon Linux 2023, `t3.medium` (2 vCPU, 4 GB), IMDSv2, no SSH key: connect with Session Manager. Docker, compose and cron installed, then Postgres + MLflow started on first boot. |
 | EBS data volume (`/data`) | gp3 20 GB, encrypted, mounted at `/data` on first boot. Kept when the instance or the stack is deleted. |
 | Security group | No inbound rules. You and the worker reach MLflow (5000) and Postgres (5432) through SSM port forwarding (section 3). |
 | SSM parameters | `/leaf-al/buckets/data`, `/leaf-al/buckets/models`, `/leaf-al/queues/jobs-url`. |
@@ -97,7 +97,7 @@ Deploy-time settings are CDK context values (`-c key=value`):
 | --- | --- | --- |
 | `budgetEmail` | none (no Budget) | Where Budget alerts go |
 | `budgetUsd` | `20` | Monthly budget in USD |
-| `instanceType` | `t3.small` | EC2 instance type (x86_64) |
+| `instanceType` | `t3.medium` | EC2 instance type (x86_64) |
 | `dataVolumeGb` | `20` | Size of the `/data` volume |
 
 ## 1. Secrets in SSM Parameter Store (before the first deploy)
@@ -162,25 +162,46 @@ new, empty volume and new buckets; restore Postgres from a backup (section 5).
 
 ## 3. EC2 services (Postgres + MLflow)
 
-Connect with Session Manager (install the
-[Session Manager plugin](https://docs.aws.amazon.com/systems-manager/latest/userguide/session-manager-working-with-install-plugin.html)
-for the AWS CLI once):
+Nothing to do by hand on a new instance. First boot mounts `/data`, clones this
+repo to `/home/ec2-user/duytq5-leaf-al-platform` and runs
+`deploy/ec2/bootstrap.sh`, which writes `.env` from SSM, runs
+`docker compose up -d --build` and installs the nightly backup cron line. That
+needs the Postgres password from section 1 to exist before the deploy.
+
+Check it a few minutes after the deploy (the first image build takes a while),
+from your machine:
 
 ```bash
-aws ssm start-session --target <InstanceId>
+scripts/ec2.sh tunnel    # then open http://localhost:5000
+scripts/ec2.sh backup    # in another terminal: "backed up to s3://..."
 ```
 
-On the instance, check that first-boot setup finished and `/data` is mounted,
-then start the services:
+If MLflow does not open, look at the first-boot log, fix the cause (usually a
+missing SSM parameter), and run the setup again:
 
 ```bash
-sudo tail -n 20 /var/log/cloud-init-output.log
-df -h /data
-sudo su - ec2-user
-git clone https://github.com/duytq5/duytq5-leaf-al-platform.git && cd duytq5-leaf-al-platform/deploy/ec2
-AWS_REGION=<region> ./write-env.sh     # writes .env from SSM, mode 600
-docker compose up -d --build
+scripts/ec2.sh shell     # needs the Session Manager plugin, see below
+sudo tail -n 40 /var/log/cloud-init-output.log
 ```
+
+```bash
+scripts/ec2.sh setup     # from your machine: pull main on the host, rerun bootstrap.sh
+```
+
+Run `scripts/ec2.sh setup` again whenever `deploy/ec2/` changes on main, and
+once on an instance created before first boot did this (it clones the repo if
+it is missing). It is safe to repeat. The host's checkout only tracks main:
+`setup` resets it to `origin/main`, so edits made on the host are dropped
+(`.env` is not tracked and stays).
+
+Changing `instanceType` on a deployed stack stops and starts the same instance
+(`/data` and the root disk stay), but first boot does not run again, so run
+`scripts/ec2.sh setup` after that deploy.
+
+Session Manager needs its plugin for the AWS CLI on your machine, once:
+`brew install --cask session-manager-plugin` on macOS, or see
+[the install guide](https://docs.aws.amazon.com/systems-manager/latest/userguide/session-manager-working-with-install-plugin.html).
+Without it, `shell` and `tunnel` fail with `SessionManagerPlugin is not found`.
 
 ### Reach MLflow and Postgres (SSM tunnel)
 
@@ -211,15 +232,21 @@ scripts/ec2.sh stop              # backs up Postgres to S3 first, then stops
 scripts/ec2.sh stop --no-backup  # skip the backup
 scripts/ec2.sh status            # instance state
 scripts/ec2.sh backup            # backup only
+scripts/ec2.sh setup             # pull main on the host, rerun bootstrap.sh
 scripts/ec2.sh tunnel            # MLflow on localhost:5000 (Ctrl-C to close)
 scripts/ec2.sh tunnel postgres   # Postgres on localhost:5432
+scripts/ec2.sh tunnel mlflow 5050 # another local port, see below
 scripts/ec2.sh shell             # Session Manager shell
 ```
+
+On macOS, port 5000 is taken by AirPlay Receiver (System Settings → General →
+AirDrop & Handoff). Turn it off, or use `scripts/ec2.sh tunnel mlflow 5050` and
+open `http://localhost:5050`.
 
 `stop` runs the backup because the nightly cron backup only runs while the
 instance is on. If the backup fails, the instance is left running. The backup
 runs through SSM Run Command, so the repo must be cloned at
-`/home/ec2-user/duytq5-leaf-al-platform` with `.env` written (step above).
+`/home/ec2-user/duytq5-leaf-al-platform` with `.env` written (section 3 does both on first boot).
 
 While it is stopped, nothing that needs Postgres or MLflow can run; jobs sent
 to SQS wait in the queue. Do not `cdk destroy` to save money day to day: the
@@ -267,11 +294,8 @@ Snapshot the volume before risky changes:
 aws ec2 create-snapshot --volume-id <DataVolumeId> --description "leaf-al before <change>"
 ```
 
-And dump Postgres to S3 nightly from the instance (`crontab -e` as `ec2-user`):
-
-```
-0 3 * * * /home/ec2-user/duytq5-leaf-al-platform/deploy/ec2/backup-postgres.sh >> /home/ec2-user/leaf-al-backup.log 2>&1
-```
+Postgres is dumped to S3 every night at 03:00 UTC by the cron line that
+`bootstrap.sh` installs for `ec2-user` (log: `/home/ec2-user/leaf-al-backup.log`).
 
 Dumps are kept for 30 days. Restore one into a fresh, empty Postgres:
 
