@@ -69,13 +69,17 @@ uv run al seed configs/datasets/rocole.yaml <image-dir> --bucket <data-bucket>
 `<image-dir>` has one sub-folder of JPEGs per class, named by the class code in the dataset
 config. The seed uploads each image to `raw/<dataset>/<sha256>.jpg`, then records
 it with a split that is stratified per class and fixed by the split seed.
+With `split.group_pattern` (RoCoLe: `^(C\d+P\d+)`), all images of one plant
+land in the same split, so views of one leaf never sit in both train and test.
 Re-running it skips what is already there, and an image keeps its first split.
 The dataset config names its crop (`crop: coffee`); the seed adds or renames the
 crops listed in `configs/crops.yaml` and fails on an unknown crop code.
 Train images become the AL pool (`unlabeled`), with their ground truth only in
-`oracle_labels`. Val and test images are `labeled` and can never enter the pool
-(a database constraint enforces it). The seed also creates dataset version v0 (the seed labels),
-which every strategy's first round starts from. Each round's merge step makes
+`oracle_labels`, except a small initial set (`split.initial_labeled`, 10 % of
+each class's train images for RoCoLe) that is labeled at seeding. Val and test
+images are `labeled` and can never enter the pool (a database constraint
+enforces it). The seed also creates dataset version v0 (the seed labels: val,
+test and the initial train set), which the first round trains on. Each round's merge step makes
 the next version, and `labels` is append-only, so any version can be rebuilt or
 rolled back to.
 

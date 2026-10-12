@@ -5,23 +5,30 @@ holding JPEG files. Every image is named by its SHA-256, so re-running the seed
 skips images that are already in S3 and in Postgres.
 
 The train/val/test split is stratified per class and fixed: each image's place
-depends only on its SHA-256 and the split seed, never on file order. Images
-already in Postgres keep the split they were given the first time.
+depends only on its SHA-256 (or its group, see SplitConfig.group_pattern) and
+the split seed, never on file order. Images of one group, such as the views of
+one plant, always share a split. Images already in Postgres keep the split they
+were given the first time.
 
 What lands where:
   train images  status 'unlabeled' (the AL pool); ground truth only in oracle_labels
+  initial set   a share of each class's new train images (split.initial_labeled),
+                until a round has used v0: status 'labeled', label in labels
+                (source 'seed', no round)
   val, test     status 'labeled'; ground truth in labels (source 'seed', no round)
-                and oracle_labels
+  every image   ground truth in oracle_labels
 
 Crops from configs/crops.yaml are upserted by code (an existing crop only gets
 its names updated), and the dataset must name one of them.
 
-The seed also makes dataset version v0: the seed labels, which every
-strategy's first round starts from. Once a round has used v0 it is frozen, and
-seeding new val/test images is refused (they would change v0 under that round).
+The seed also makes dataset version v0: the seed labels (val, test and the
+initial train set), which the first round trains on. Once a round has used v0
+it is frozen, and adding seed labels is refused (they would change v0 under
+that round).
 """
 
 import hashlib
+import re
 from collections import Counter, defaultdict
 from collections.abc import Iterable
 from concurrent.futures import ThreadPoolExecutor
@@ -59,6 +66,7 @@ class SeedReport:
     new_rows: int = 0
     existing_rows: int = 0
     kept_existing_split: int = 0
+    initial_labeled: int = 0  # train images labeled at seeding in this run
     v0_added: int = 0
 
 
@@ -137,23 +145,67 @@ def scan(source: Path, labels: list[str]) -> list[SourceImage]:
     return list(by_sha.values())
 
 
+def group_key(img: SourceImage, cfg: SplitConfig) -> str:
+    """The unit the split keeps together: the group_pattern match on the file
+    name, or the image itself."""
+    if cfg.group_pattern is None:
+        return img.sha256
+    m = re.search(cfg.group_pattern, img.path.name)
+    if not m:
+        raise SeedError(f"{img.path.name!r} does not match group_pattern {cfg.group_pattern!r}")
+    return m.group(1) if m.groups() else m.group(0)
+
+
 def assign_splits(images: Iterable[SourceImage], cfg: SplitConfig) -> dict[str, Split]:
-    """Stratified, order-independent split: within each class, images are
-    ranked by sha256(seed:image_sha) and the first round(n*test) go to test,
-    the next round(n*val) to val, the rest to train."""
-    by_label: dict[str, list[str]] = defaultdict(list)
+    """Stratified, grouped, order-independent split. Each group counts under
+    its most common class. Within a class, groups are ranked by
+    sha256(seed:group) and fill test up to round(n*test) images, then val up
+    to round(n*val), then the rest go to train (n = images of that class)."""
+    groups: dict[str, list[SourceImage]] = defaultdict(list)
     for img in images:
-        by_label[img.label].append(img.sha256)
+        groups[group_key(img, cfg)].append(img)
+
+    by_label: dict[str, list[str]] = defaultdict(list)
+    for key, members in groups.items():
+        counts = Counter(i.label for i in members)
+        label = min(counts, key=lambda y: (-counts[y], y))
+        by_label[label].append(key)
 
     out: dict[str, Split] = {}
+    for keys in by_label.values():
+        ranked = sorted(keys, key=lambda k: hashlib.sha256(f"{cfg.seed}:{k}".encode()).hexdigest())
+        n = sum(len(groups[k]) for k in ranked)
+        n_test, n_val = round(n * cfg.test), round(n * cfg.val)
+        taken = {Split.TEST: 0, Split.VAL: 0}
+        for key in ranked:
+            if taken[Split.TEST] < n_test:
+                split = Split.TEST
+            elif taken[Split.VAL] < n_val:
+                split = Split.VAL
+            else:
+                split = Split.TRAIN
+            if split in taken:
+                taken[split] += len(groups[key])
+            for img in groups[key]:
+                out[img.sha256] = split
+    return out
+
+
+def pick_initial(
+    images: Iterable[SourceImage], splits: dict[str, Split], cfg: SplitConfig
+) -> set[str]:
+    """The train images labeled at seeding: round(n*initial_labeled) of each
+    class's n train images, ranked by sha256(seed:initial:image_sha)."""
+    by_label: dict[str, list[str]] = defaultdict(list)
+    for img in images:
+        if splits[img.sha256] is Split.TRAIN:
+            by_label[img.label].append(img.sha256)
+    out: set[str] = set()
     for shas in by_label.values():
-        ranked = sorted(shas, key=lambda s: hashlib.sha256(f"{cfg.seed}:{s}".encode()).hexdigest())
-        n_test = round(len(ranked) * cfg.test)
-        n_val = round(len(ranked) * cfg.val)
-        for i, sha in enumerate(ranked):
-            out[sha] = (
-                Split.TEST if i < n_test else Split.VAL if i < n_test + n_val else Split.TRAIN
-            )
+        ranked = sorted(
+            shas, key=lambda s: hashlib.sha256(f"{cfg.seed}:initial:{s}".encode()).hexdigest()
+        )
+        out.update(ranked[: round(len(ranked) * cfg.initial_labeled)])
     return out
 
 
@@ -177,6 +229,7 @@ def _record(
     crops: CropsConfig,
     images,
     splits,
+    initial: set[str],
     report: SeedReport,
 ):
     with conn.transaction():
@@ -186,9 +239,23 @@ def _record(
             conn.execute("SELECT code, id FROM classes WHERE dataset_id = %s", (dataset_id,))
         )
 
-        before = conn.execute(
-            "SELECT count(*) FROM images WHERE dataset_id = %s", (dataset_id,)
-        ).fetchone()[0]
+        # Only images new to the database can join the initial labeled set: an
+        # existing train image keeps its state, whatever later rounds did to it.
+        existing = {
+            sha
+            for (sha,) in conn.execute(
+                "SELECT sha256 FROM images WHERE dataset_id = %s", (dataset_id,)
+            )
+        }
+        initial = {sha for sha in initial if sha not in existing}
+        # Once a round trained on v0, v0 is frozen: new train images join the pool.
+        if conn.execute(
+            "SELECT 1 FROM rounds r JOIN dataset_versions v ON v.id = r.base_version_id"
+            " WHERE v.dataset_id = %s AND v.version = 0",
+            (dataset_id,),
+        ).fetchone():
+            initial = set()
+        before = len(existing)
         with conn.cursor() as cur:
             cur.executemany(
                 "INSERT INTO images (dataset_id, sha256, s3_key, status, split, source)"
@@ -199,7 +266,7 @@ def _record(
                         img.sha256,
                         raw_key(cfg.name, img.sha256),
                         ImageStatus.UNLABELED
-                        if splits[img.sha256] is Split.TRAIN
+                        if splits[img.sha256] is Split.TRAIN and img.sha256 not in initial
                         else ImageStatus.LABELED,
                         splits[img.sha256],
                         ImageSource.SEED,
@@ -247,9 +314,10 @@ def _record(
                 [
                     (rows[img.sha256][0], class_ids[img.label])
                     for img in images
-                    if rows[img.sha256][1] is not Split.TRAIN
+                    if rows[img.sha256][1] is not Split.TRAIN or img.sha256 in initial
                 ],
             )
+        report.initial_labeled = len(initial)
         report.v0_added = _fill_v0(conn, cfg.name, dataset_id)
 
     final = {sha: split for sha, (_, split) in rows.items()}
@@ -329,7 +397,7 @@ def _fill_v0(conn: psycopg.Connection, dataset: str, dataset_id: int) -> int:
         return 0
     if conn.execute("SELECT 1 FROM rounds WHERE base_version_id = %s", (v0,)).fetchone():
         raise SeedError(
-            f"{len(missing)} new val/test images for {dataset!r}, but a round already "
+            f"{len(missing)} new seed labels for {dataset!r}, but a round already "
             "trained on v0, which must not change; seed them into a new dataset"
         )
     with conn.cursor() as cur:
@@ -341,9 +409,11 @@ def _fill_v0(conn: psycopg.Connection, dataset: str, dataset_id: int) -> int:
     return len(missing)
 
 
-def plan(cfg: DatasetConfig, source: Path) -> tuple[list[SourceImage], dict[str, Split]]:
+def plan(cfg: DatasetConfig, source: Path) -> tuple[list[SourceImage], dict[str, Split], set[str]]:
+    """Images, their split, and the train images labeled at seeding."""
     images = scan(source, cfg.codes)
-    return images, assign_splits(images, cfg.split)
+    splits = assign_splits(images, cfg.split)
+    return images, splits, pick_initial(images, splits, cfg.split)
 
 
 def check_crop(cfg: DatasetConfig, crops: CropsConfig) -> None:
@@ -364,10 +434,10 @@ def seed_dataset(
     Safe to re-run after a failure at any point. Crops are upserted from
     configs/crops.yaml; the dataset's crop must be one of them."""
     check_crop(cfg, crops)
-    images, splits = plan(cfg, source)
+    images, splits, initial = plan(cfg, source)
     report = SeedReport(dataset=cfg.name)
     _upload(images, cfg.name, store, report)
-    _record(conn, cfg, crops, images, splits, report)
+    _record(conn, cfg, crops, images, splits, initial, report)
     return report
 
 

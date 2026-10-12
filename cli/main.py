@@ -66,9 +66,10 @@ def cmd_seed(args: argparse.Namespace) -> int:
         crops = CropsConfig.from_yaml(args.crops)
         check_crop(cfg, crops)
         if args.dry_run:
-            images, splits = plan(cfg, Path(args.source))
+            images, splits, initial = plan(cfg, Path(args.source))
             print(f"dry run: {len(images)} images for {cfg.name}, classes {cfg.codes}")
             _print_split(split_counts(images, splits))
+            print(f"  initial labeled train images (v0): {len(initial)}")
             return 0
         bucket = args.bucket or os.environ.get("DATA_BUCKET")
         if not bucket:
@@ -86,7 +87,7 @@ def cmd_seed(args: argparse.Namespace) -> int:
     print(
         f"{cfg.name}: uploaded {report.uploaded}, already in S3 {report.already_in_s3}; "
         f"new rows {report.new_rows}, existing {report.existing_rows}; "
-        f"v0 labels added {report.v0_added}"
+        f"initial labeled train {report.initial_labeled}; v0 labels added {report.v0_added}"
         + (
             f", kept earlier split for {report.kept_existing_split}"
             if report.kept_existing_split

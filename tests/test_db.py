@@ -116,6 +116,41 @@ def test_seed_rerun_is_a_noop(conn, tmp_path):
     assert conn.execute("SELECT count(*) FROM labels").fetchone() == (12,)
 
 
+def test_seed_labels_an_initial_train_set_into_v0(conn, tmp_path):
+    cfg = CFG.model_copy(update={"split": CFG.split.model_copy(update={"initial_labeled": 0.25})})
+    src = make_folder(tmp_path, {"a": 20, "b": 10})
+    report = seed_dataset(conn, cfg, src, FakeStore(), CROPS)
+
+    # Train is 12 a + 6 b; a quarter of each class is labeled at seeding.
+    assert report.initial_labeled == 3 + 2
+    assert conn.execute(
+        "SELECT status, count(*) FROM images WHERE split = 'train' GROUP BY 1 ORDER BY 1"
+    ).fetchall() == [("labeled", 5), ("unlabeled", 13)]
+    v0 = _v0(conn)
+    assert report.v0_added == 12 + 5
+    assert sorted(conn.execute(LABELED_COUNTS_SQL, {"version_id": v0}).fetchall()) == [
+        ("a", 3),
+        ("b", 2),
+    ]
+
+    # A re-run never relabels old train images.
+    before = conn.execute("SELECT count(*) FROM labels").fetchone()
+    assert seed_dataset(conn, cfg, src, FakeStore(), CROPS).initial_labeled == 0
+    assert conn.execute("SELECT count(*) FROM labels").fetchone() == before
+
+    # After a round used v0, new train images all go to the pool, and v0 stays.
+    _round(conn, base=v0)
+    make_folder(tmp_path, {"a": 40}, start=20)
+    train_only = cfg.split.model_copy(update={"val": 0.0, "test": 0.001})  # new ones -> train
+    report = seed_dataset(
+        conn, cfg.model_copy(update={"split": train_only}), src, FakeStore(), CROPS
+    )
+    assert report.new_rows == 40 and report.initial_labeled == 0 and report.v0_added == 0
+    assert conn.execute(
+        "SELECT count(*) FROM images WHERE split = 'train' AND status = 'unlabeled'"
+    ).fetchone() == (13 + 40,)
+
+
 def test_seed_keeps_first_split_when_images_are_added(conn, tmp_path):
     src = make_folder(tmp_path, {"a": 20, "b": 10})
     seed_dataset(conn, CFG, src, FakeStore(), CROPS)

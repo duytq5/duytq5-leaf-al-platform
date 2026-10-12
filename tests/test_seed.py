@@ -5,17 +5,24 @@ import pytest
 
 from cli.main import main
 from common.dataset import CropsConfig, DatasetConfig, SplitConfig
-from db.seed import SeedError, assign_splits, scan, split_counts
+from db.seed import SeedError, assign_splits, pick_initial, scan, split_counts
 
 ROOT = Path(__file__).resolve().parents[1]
 JPEG = b"\xff\xd8\xff\xe0"
 
 
-def make_folder(root: Path, per_label: dict[str, int], start: int = 0) -> Path:
+ROCOLE = ["coffee___healthy", "coffee___red_spider_mite", "coffee___rust"]
+
+
+def make_folder(
+    root: Path, per_label: dict[str, int], start: int = 0, name: str = "{i}.jpg"
+) -> Path:
     for label, n in per_label.items():
         (root / label).mkdir(parents=True, exist_ok=True)
         for i in range(start, start + n):
-            (root / label / f"{i}.jpg").write_bytes(JPEG + f"{label}-{i}".encode())
+            (root / label / name.format(i=i, label=label)).write_bytes(
+                JPEG + f"{label}-{i}".encode()
+            )
     return root
 
 
@@ -23,7 +30,8 @@ def test_example_dataset_config_loads():
     cfg = DatasetConfig.from_yaml(ROOT / "configs/datasets/rocole.yaml")
     assert cfg.name == "rocole"
     assert cfg.split.test > 0
-    assert cfg.codes == ["healthy", "red_spider_mite", "rust"]
+    assert cfg.codes == ROCOLE
+    assert cfg.split.group_pattern and cfg.split.initial_labeled > 0
     assert all(c.display_name for c in cfg.classes)
     assert cfg.crop in CropsConfig.from_yaml(ROOT / "configs/crops.yaml").codes
 
@@ -38,7 +46,7 @@ def test_crop_codes_are_unique_machine_names():
 def test_seed_cli_refuses_an_unknown_crop(tmp_path, capsys):
     crops = tmp_path / "crops.yaml"
     crops.write_text("crops: [{code: durian, display_name: Durian}]\n")
-    make_folder(tmp_path / "img", {"healthy": 2, "red_spider_mite": 2, "rust": 2})
+    make_folder(tmp_path / "img", dict.fromkeys(ROCOLE, 2))
     config = str(ROOT / "configs/datasets/rocole.yaml")
     args = ["seed", config, str(tmp_path / "img"), "--crops", str(crops), "--dry-run"]
     assert main(args) == 1
@@ -128,7 +136,9 @@ def test_split_is_stratified_and_deterministic(tmp_path):
 
 
 def test_seed_dry_run(tmp_path, capsys):
-    make_folder(tmp_path / "imgs", {"healthy": 20, "red_spider_mite": 10, "rust": 10})
+    # RoCoLe file names start with the plant, C<n>P<n>.
+    for start, label, n in [(0, ROCOLE[0], 20), (100, ROCOLE[1], 10), (200, ROCOLE[2], 10)]:
+        make_folder(tmp_path / "imgs", {label: n}, start=start, name="C1P{i}E1.jpg")
     assert (
         main(
             [
@@ -143,11 +153,12 @@ def test_seed_dry_run(tmp_path, capsys):
     out = capsys.readouterr().out
     assert "dry run: 40 images" in out
     assert "test       7" in out
+    assert "initial labeled train images (v0): 3" in out
 
 
 def test_seed_needs_bucket(tmp_path, capsys, monkeypatch):
     monkeypatch.delenv("DATA_BUCKET", raising=False)
-    make_folder(tmp_path, {"healthy": 2, "red_spider_mite": 2, "rust": 2})
+    make_folder(tmp_path, dict.fromkeys(ROCOLE, 2))
     assert main(["seed", str(ROOT / "configs/datasets/rocole.yaml"), str(tmp_path)]) == 1
     assert "--bucket" in capsys.readouterr().out
 
@@ -170,3 +181,47 @@ def test_s3_store_exists_and_put(tmp_path):
         assert store.exists("raw/b.jpg") is False
         with pytest.raises(Exception, match="403"):
             store.exists("raw/c.jpg")
+
+
+def test_split_keeps_a_group_together(tmp_path):
+    # Class a: plants P0..P29 with two views each (E1, E2). Class b: 20 plants, one view.
+    (tmp_path / "a").mkdir()
+    for i in range(30):
+        for view in (1, 2):
+            (tmp_path / "a" / f"C1P{i}E{view}.jpg").write_bytes(JPEG + f"a-{i}-{view}".encode())
+    make_folder(tmp_path, {"b": 20}, start=100, name="C1P{i}E1.jpg")
+    images = scan(tmp_path, ["a", "b"])
+    cfg = SplitConfig(val=0.2, test=0.2, seed=1, group_pattern=r"^(C\d+P\d+)")
+    splits = assign_splits(images, cfg)
+
+    by_plant: dict[str, set] = {}
+    for img in images:
+        by_plant.setdefault(img.path.name.split("E")[0], set()).add(splits[img.sha256])
+    assert all(len(s) == 1 for s in by_plant.values())
+    counts = split_counts(images, splits)
+    assert counts["test"]["a"] == 12 and counts["val"]["a"] == 12  # 6 plants each
+    assert assign_splits(list(reversed(images)), cfg) == splits
+
+
+def test_split_without_a_group_match_is_refused(tmp_path):
+    images = scan(make_folder(tmp_path, {"a": 3, "b": 3}), ["a", "b"])
+    with pytest.raises(SeedError, match="group_pattern"):
+        assign_splits(images, SplitConfig(val=0.2, test=0.2, group_pattern=r"^C\d+"))
+
+
+def test_split_config_rejects_a_bad_pattern():
+    with pytest.raises(ValueError, match="regex"):
+        SplitConfig(val=0.1, test=0.1, group_pattern="(")
+
+
+def test_initial_set_is_stratified_train_only_and_deterministic(tmp_path):
+    images = scan(make_folder(tmp_path, {"a": 100, "b": 20}), ["a", "b"])
+    cfg = SplitConfig(val=0.15, test=0.15, seed=7, initial_labeled=0.1)
+    splits = assign_splits(images, cfg)
+    initial = pick_initial(images, splits, cfg)
+    assert all(splits[sha].value == "train" for sha in initial)
+    labels = Counter(i.label for i in images if i.sha256 in initial)
+    assert labels == {"a": 7, "b": 1}  # 10 % of 70 and of 14
+    assert pick_initial(list(reversed(images)), splits, cfg) == initial
+    no_initial = SplitConfig(val=0.15, test=0.15, seed=7)
+    assert pick_initial(images, splits, no_initial) == set()

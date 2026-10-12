@@ -307,7 +307,8 @@ export DATA_BUCKET=$(aws ssm get-parameter --name /leaf-al/buckets/data \
 ```
 
 Create the tables, then seed each dataset. `<image-dir>` has one sub-folder of
-JPEGs per class, named by the class code in the dataset config. The dataset
+JPEGs per class, named by the class code in the dataset config (for RoCoLe:
+`coffee___healthy`, `coffee___red_spider_mite`, `coffee___rust`). The dataset
 config names its crop, which must be listed in `configs/crops.yaml`; the seed
 adds or renames those crops. Check the split with `--dry-run` first; both
 commands are safe to re-run if they stop half-way.

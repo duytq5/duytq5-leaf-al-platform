@@ -2,13 +2,22 @@
 # <image-dir> has one sub-folder per class, named exactly as the class code.
 # The class order is the model's output order; never reorder after seeding.
 # code: machine name (code, model, manifest, API); display_name: what people read.
+# The codes match the image folders, the leafal research code and the mobile app.
 name: rocole
 crop: coffee  # a code from configs/crops.yaml
 display_name: Lá cà phê (RoCoLe)
 description: Robusta coffee leaf images (RoCoLe dataset)
 classes:
-  - {code: healthy, display_name: Healthy}
-  - {code: red_spider_mite, display_name: Red spider mite}
-  - {code: rust, display_name: Coffee leaf rust}
+  - {code: coffee___healthy, display_name: Healthy}
+  - {code: coffee___red_spider_mite, display_name: Red spider mite}
+  - {code: coffee___rust, display_name: Coffee leaf rust}
 # Fixed at seeding, stratified per class. Test images never enter the AL pool.
-split: {val: 0.15, test: 0.15, seed: 42}
+# group_pattern keeps both views of a plant (file names start C<n>P<n>) in one
+# split. initial_labeled: share of train labeled at seeding, the v0 that round 1
+# trains on.
+split:
+  val: 0.15
+  test: 0.15
+  seed: 42
+  group_pattern: '^(C\d+P\d+)'
+  initial_labeled: 0.1
