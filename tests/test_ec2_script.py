@@ -78,6 +78,12 @@ def test_tunnel_forwards_mlflow_by_default(tmp_path):
     )
 
 
+def test_tunnel_custom_local_port(tmp_path):
+    proc, calls = run(tmp_path, "tunnel", "mlflow", "5050")
+    assert proc.returncode == 0, proc.stderr
+    assert calls[-1].endswith("portNumber=5000,localPortNumber=5050")
+
+
 def test_tunnel_postgres(tmp_path):
     proc, calls = run(tmp_path, "tunnel", "postgres")
     assert proc.returncode == 0, proc.stderr

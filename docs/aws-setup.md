@@ -229,8 +229,13 @@ scripts/ec2.sh backup            # backup only
 scripts/ec2.sh setup             # pull main on the host, rerun bootstrap.sh
 scripts/ec2.sh tunnel            # MLflow on localhost:5000 (Ctrl-C to close)
 scripts/ec2.sh tunnel postgres   # Postgres on localhost:5432
+scripts/ec2.sh tunnel mlflow 5050 # another local port, see below
 scripts/ec2.sh shell             # Session Manager shell
 ```
+
+On macOS, port 5000 is taken by AirPlay Receiver (System Settings → General →
+AirDrop & Handoff). Turn it off, or use `scripts/ec2.sh tunnel mlflow 5050` and
+open `http://localhost:5050`.
 
 `stop` runs the backup because the nightly cron backup only runs while the
 instance is on. If the backup fails, the instance is left running. The backup

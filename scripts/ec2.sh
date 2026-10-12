@@ -12,6 +12,8 @@
 #   scripts/ec2.sh tunnel         MLflow on localhost:5000 via SSM (Ctrl-C closes)
 #   scripts/ec2.sh tunnel postgres
 #                                 Postgres on localhost:5432 via SSM
+#   scripts/ec2.sh tunnel mlflow 5050
+#                                 another local port (macOS AirPlay uses 5000)
 #   scripts/ec2.sh shell          open a Session Manager shell on the instance
 #
 # Uses AWS_PROFILE and AWS_REGION from the environment. Set INSTANCE_ID to skip
@@ -25,7 +27,7 @@ MLFLOW_PORT=5000
 POSTGRES_PORT=5432
 
 usage() {
-  sed -n '2,18p' "$0" | sed 's/^# \{0,1\}//'
+  sed -n '2,20p' "$0" | sed 's/^# \{0,1\}//'
   exit "${1:-0}"
 }
 
@@ -129,10 +131,11 @@ case "$cmd" in
       postgres) port=$POSTGRES_PORT ;;
       *) usage 1 >&2 ;;
     esac
-    echo "Forwarding localhost:$port to the instance. Ctrl-C to close."
+    local_port=${3:-$port}
+    echo "Forwarding localhost:$local_port to port $port on the instance. Ctrl-C to close."
     exec aws ssm start-session --target "$id" \
       --document-name AWS-StartPortForwardingSession \
-      --parameters "portNumber=$port,localPortNumber=$port"
+      --parameters "portNumber=$port,localPortNumber=$local_port"
     ;;
   shell)
     exec aws ssm start-session --target "$id"
