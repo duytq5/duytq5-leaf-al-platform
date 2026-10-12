@@ -19,7 +19,13 @@ STUBS = {
 
 def run(tmp_path):
     repo = tmp_path / "home" / "duytq5-leaf-al-platform"
-    shutil.copytree(ROOT / "deploy" / "ec2", repo / "deploy" / "ec2", dirs_exist_ok=True)
+    shutil.copytree(
+        ROOT / "deploy" / "ec2",
+        repo / "deploy" / "ec2",
+        dirs_exist_ok=True,
+        # CI runs the real compose Postgres first: skip its root-owned runtime files.
+        ignore=shutil.ignore_patterns("data", "tls", ".env"),
+    )
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir(exist_ok=True)
     for name, body in STUBS.items():
