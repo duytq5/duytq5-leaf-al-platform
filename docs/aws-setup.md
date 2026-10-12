@@ -5,10 +5,71 @@ is deployed automatically; you run these commands yourself, from your own
 machine with your own AWS profile. Sections marked *(later in Phase 1)* need
 resources the CDK stack does not create yet.
 
+## 0. Local AWS access and the Agent Toolkit (once per machine)
+
+Sign in with `aws login` on your own machine only. Never put AWS credentials in
+a cloud session or in this repo. The profile used here is `leaf-al`.
+
+**AWS CLI.** `aws login` and `aws configure agent-toolkit` need a recent AWS
+CLI v2 (2.32 is too old for the toolkit). Install or update it:
+
+```bash
+curl -fsSL 'https://awscli.amazonaws.com/v2/install.sh' | bash   # installs to ~/.local/bin
+echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.zshrc           # once
+hash -r                                                          # or open a new terminal
+aws --version
+```
+
+On macOS an older install may sit in `/usr/local/bin`. If `aws --version`
+still shows the old version, the shell has cached that path: run `hash -r` or
+open a new terminal. AWS's `.pkg` installer
+(`https://awscli.amazonaws.com/AWSCLIV2.pkg`) updates `/usr/local/bin` instead.
+
+**Sign in and check:**
+
+```bash
+aws configure set region ap-southeast-2 --profile leaf-al
+aws login --region ap-southeast-2 --profile leaf-al     # browser sign-in
+aws sts get-caller-identity --profile leaf-al
+```
+
+The sign-in lasts 12 hours and renews for up to 90 days without the browser.
+
+**Agent Toolkit** (AWS skills and the AWS MCP server for Claude Code and other
+AI tools). The toolkit service runs only in `us-east-1`, whatever the project
+region:
+
+```bash
+aws configure agent-toolkit --yes --region us-east-1 --profile leaf-al
+aws agent-toolkit list-available-skills --region us-east-1 --profile leaf-al   # check
+```
+
+The wizard adds an `aws-mcp` entry to each tool's MCP config (for Claude Code,
+`~/.claude.json`). That entry uses the `default` profile, so add this to each
+`aws-mcp` entry and restart the tool, or the server fails with
+`JSON-RPC error: -32602`:
+
+```json
+"env": { "AWS_MCP_PROXY_PROFILES": "leaf-al" }
+```
+
+For another account later: `aws login --profile <name>`, add the name to the
+space-separated `AWS_MCP_PROXY_PROFILES` list, restart the tool.
+
+| Error | Fix |
+| --- | --- |
+| `Found invalid choice 'agent-toolkit'` | The old CLI is still being run. `hash -r` or a new terminal, then `aws --version`. |
+| `--yes` not recognized | Run the wizard without `--yes`. |
+| `Unable to locate credentials` / `ExpiredToken` | Run `aws login --profile leaf-al` again. |
+| `command not found: aws` | `export PATH="$HOME/.local/bin:$PATH"` |
+
+The project's rules still apply when an AI tool has AWS access: you deploy, and
+nothing creates AWS resources unless you ask for it.
+
 Set these once per shell:
 
 ```bash
-export AWS_PROFILE=<your-profile>
+export AWS_PROFILE=leaf-al
 export AWS_REGION=ap-southeast-2          # the project region; keep it
 export CDK_DEFAULT_REGION=$AWS_REGION
 export CDK_DEFAULT_ACCOUNT=$(aws sts get-caller-identity --query Account --output text)
@@ -24,7 +85,7 @@ export CDK_DEFAULT_ACCOUNT=$(aws sts get-caller-identity --query Account --outpu
 | S3 models bucket (`al-models`) | Same, plus versioning (old versions expire after 90 days). Kept on `cdk destroy`. |
 | SQS job queue + dead-letter queue | 20 s long polling, 30 min visibility, 14-day retention, a job goes to the DLQ after 3 failed receives. |
 | IAM user for the GPU worker | SSM port forwarding to the host only (no shell), consume jobs, report Step Functions task results, read `raw/` and `manifests/`, write `scores/`, read/write `mlflow-artifacts/`. No access key: you create it (section 4). |
-| VPC + EC2 instance | One public subnet, no NAT gateway. Amazon Linux 2023, `t3.small`, IMDSv2, no SSH key: connect with Session Manager. Docker, compose and cron installed on first boot. |
+| VPC + EC2 instance | One public subnet, no NAT gateway. Amazon Linux 2023, `t3.medium` (2 vCPU, 4 GB), IMDSv2, no SSH key: connect with Session Manager. Docker, compose and cron installed, then Postgres + MLflow started on first boot. |
 | EBS data volume (`/data`) | gp3 20 GB, encrypted, mounted at `/data` on first boot. Kept when the instance or the stack is deleted. |
 | Security group | No inbound rules. You and the worker reach MLflow (5000) and Postgres (5432) through SSM port forwarding (section 3). |
 | SSM parameters | `/leaf-al/buckets/data`, `/leaf-al/buckets/models`, `/leaf-al/queues/jobs-url`. |
@@ -36,7 +97,7 @@ Deploy-time settings are CDK context values (`-c key=value`):
 | --- | --- | --- |
 | `budgetEmail` | none (no Budget) | Where Budget alerts go |
 | `budgetUsd` | `20` | Monthly budget in USD |
-| `instanceType` | `t3.small` | EC2 instance type (x86_64) |
+| `instanceType` | `t3.medium` | EC2 instance type (x86_64) |
 | `dataVolumeGb` | `20` | Size of the `/data` volume |
 
 ## 1. Secrets in SSM Parameter Store (before the first deploy)
@@ -115,25 +176,47 @@ new, empty volume and new buckets; restore Postgres from a backup (section 5).
 
 ## 3. EC2 services (Postgres + MLflow)
 
-Connect with Session Manager (install the
-[Session Manager plugin](https://docs.aws.amazon.com/systems-manager/latest/userguide/session-manager-working-with-install-plugin.html)
-for the AWS CLI once):
+Nothing to do by hand on a new instance. First boot mounts `/data`, clones this
+repo to `/home/ec2-user/duytq5-leaf-al-platform` and runs
+`deploy/ec2/bootstrap.sh`, which writes `.env` from SSM, runs
+`docker compose up -d --build` and installs the nightly backup cron line. That
+needs the Postgres password and the two TLS parameters from section 1 to exist
+before the deploy.
+
+Check it a few minutes after the deploy (the first image build takes a while),
+from your machine:
 
 ```bash
-aws ssm start-session --target <InstanceId>
+scripts/ec2.sh tunnel    # then open http://localhost:5000
+scripts/ec2.sh backup    # in another terminal: "backed up to s3://..."
 ```
 
-On the instance, check that first-boot setup finished and `/data` is mounted,
-then start the services:
+If MLflow does not open, look at the first-boot log, fix the cause (usually a
+missing SSM parameter), and run the setup again:
 
 ```bash
-sudo tail -n 20 /var/log/cloud-init-output.log
-df -h /data
-sudo su - ec2-user
-git clone https://github.com/duytq5/duytq5-leaf-al-platform.git && cd duytq5-leaf-al-platform/deploy/ec2
-AWS_REGION=ap-southeast-2 ./write-env.sh     # writes .env and tls/ from SSM, mode 600
-docker compose up -d --build
+scripts/ec2.sh shell     # needs the Session Manager plugin, see below
+sudo tail -n 40 /var/log/cloud-init-output.log
 ```
+
+```bash
+scripts/ec2.sh setup     # from your machine: pull main on the host, rerun bootstrap.sh
+```
+
+Run `scripts/ec2.sh setup` again whenever `deploy/ec2/` changes on main, and
+once on an instance created before first boot did this (it clones the repo if
+it is missing). It is safe to repeat. The host's checkout only tracks main:
+`setup` resets it to `origin/main`, so edits made on the host are dropped
+(`.env` is not tracked and stays).
+
+Changing `instanceType` on a deployed stack stops and starts the same instance
+(`/data` and the root disk stay), but first boot does not run again, so run
+`scripts/ec2.sh setup` after that deploy.
+
+Session Manager needs its plugin for the AWS CLI on your machine, once:
+`brew install --cask session-manager-plugin` on macOS, or see
+[the install guide](https://docs.aws.amazon.com/systems-manager/latest/userguide/session-manager-working-with-install-plugin.html).
+Without it, `shell` and `tunnel` fail with `SessionManagerPlugin is not found`.
 
 ### Reach MLflow and Postgres (SSM tunnel)
 
@@ -151,26 +234,51 @@ MLflow is then at `http://localhost:5000`. For Postgres, run a second session
 with `portNumber=5432,localPortNumber=5432` and connect to `localhost:5432`.
 The instance ID stays the same when the instance stops and starts.
 
-Stop the instance when not in use (the volume keeps all data):
+### Daily start and stop
+
+EC2 is the only part of the stack that costs money while idle, so stop the
+instance when you are not working. The disks keep all data and Postgres and
+MLflow start again on boot (`restart: unless-stopped`). Use the script, with
+`AWS_PROFILE` and `AWS_REGION` set as above:
 
 ```bash
-aws ec2 stop-instances  --instance-ids <InstanceId>
-aws ec2 start-instances --instance-ids <InstanceId>
+scripts/ec2.sh start             # waits until running
+scripts/ec2.sh stop              # backs up Postgres to S3 first, then stops
+scripts/ec2.sh stop --no-backup  # skip the backup
+scripts/ec2.sh status            # instance state
+scripts/ec2.sh backup            # backup only
+scripts/ec2.sh setup             # pull main on the host, rerun bootstrap.sh
+scripts/ec2.sh tunnel            # MLflow on localhost:5000 (Ctrl-C to close)
+scripts/ec2.sh tunnel postgres   # Postgres on localhost:5432
+scripts/ec2.sh tunnel mlflow 5050 # another local port, see below
+scripts/ec2.sh shell             # Session Manager shell
 ```
 
 `write-env.sh` refuses a Postgres password shorter than 32 characters.
 Postgres rejects every network connection without TLS (`postgres/pg_hba.conf`),
 MLflow's included, and the tunnel does not change that.
+
+On macOS, port 5000 is taken by AirPlay Receiver (System Settings → General →
+AirDrop & Handoff). Turn it off, or use `scripts/ec2.sh tunnel mlflow 5050` and
+open `http://localhost:5050`.
+
+`stop` runs the backup because the nightly cron backup only runs while the
+instance is on. If the backup fails, the instance is left running. The backup
+runs through SSM Run Command, so the repo must be cloned at
+`/home/ec2-user/duytq5-leaf-al-platform` with `.env` written (section 3 does both on first boot).
+
+While it is stopped, nothing that needs Postgres or MLflow can run; jobs sent
+to SQS wait in the queue. Do not `cdk destroy` to save money day to day: the
+next deploy creates new, empty buckets and a new data volume.
+
 The tunnel is for you and the worker. The PR that adds the first Lambda that
 needs Postgres also decides how that Lambda reaches it.
 
 If the services already run from an earlier version of this repo, create the
-two TLS parameters (section 1), then on the instance:
+two TLS parameters (section 1), then from your machine:
 
 ```bash
-cd ~/duytq5-leaf-al-platform && git pull && cd deploy/ec2
-AWS_REGION=ap-southeast-2 ./write-env.sh
-docker compose up -d --build           # recreates Postgres with TLS; data is kept
+scripts/ec2.sh setup     # recreates Postgres with TLS; data is kept
 ```
 
 ## 3a. Database tables and seed data
@@ -254,11 +362,8 @@ Snapshot the volume before risky changes:
 aws ec2 create-snapshot --volume-id <DataVolumeId> --description "leaf-al before <change>"
 ```
 
-And dump Postgres to S3 nightly from the instance (`crontab -e` as `ec2-user`):
-
-```
-0 3 * * * /home/ec2-user/duytq5-leaf-al-platform/deploy/ec2/backup-postgres.sh >> /home/ec2-user/leaf-al-backup.log 2>&1
-```
+Postgres is dumped to S3 every night at 03:00 UTC by the cron line that
+`bootstrap.sh` installs for `ec2-user` (log: `/home/ec2-user/leaf-al-backup.log`).
 
 Dumps are kept for 30 days. Restore one into a fresh, empty Postgres:
 

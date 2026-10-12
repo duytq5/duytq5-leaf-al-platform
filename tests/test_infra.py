@@ -32,7 +32,10 @@ def bare() -> Template:
 
 
 def _statements(template: Template, logical_prefix: str) -> list[dict]:
-    policies = template.find_resources("AWS::IAM::Policy")
+    policies = {
+        **template.find_resources("AWS::IAM::Policy"),
+        **template.find_resources("AWS::IAM::ManagedPolicy"),
+    }
     (policy,) = [p for k, p in policies.items() if k.startswith(logical_prefix)]
     return policy["Properties"]["PolicyDocument"]["Statement"]
 
@@ -114,7 +117,7 @@ def test_ssm_parameter_names(full):
 
 
 def test_worker_policy_is_scoped(full):
-    statements = _statements(full, "WorkerUserDefaultPolicy")
+    statements = _statements(full, "WorkerPolicy")
     for stmt in statements:
         assert stmt["Effect"] == "Allow"
         for action in _actions(stmt):
@@ -131,6 +134,21 @@ def test_worker_policy_is_scoped(full):
     written = json.dumps([s["Resource"] for s in writes])
     assert "/scores/*" in written and "/mlflow-artifacts/*" in written
     assert "/raw/*" not in written and "/manifests/*" not in written
+
+
+def test_worker_policy_fits_iam_limits(full):
+    # IAM caps a user's inline policies at 2,048 characters, which the worker
+    # outgrew (CREATE_FAILED on the first real deploy). Managed policies allow
+    # 6,144 characters, not counting whitespace.
+    user_policies = [
+        p for p in full.find_resources("AWS::IAM::Policy").values() if p["Properties"].get("Users")
+    ]
+    assert user_policies == []
+    (managed,) = full.find_resources("AWS::IAM::ManagedPolicy").values()
+    ((user_ref,),) = [[u["Ref"] for u in managed["Properties"]["Users"]]]
+    assert user_ref.startswith("WorkerUser")
+    size = len(json.dumps(managed["Properties"]["PolicyDocument"], separators=(",", ":")))
+    assert size < 6144 * 0.8, size  # rendered tokens count too; keep headroom
 
 
 def test_no_access_key_in_template(full):
@@ -151,7 +169,7 @@ def test_old_cidr_context_is_ignored():
 
 
 def test_worker_can_only_port_forward_to_host(full):
-    statements = _statements(full, "WorkerUserDefaultPolicy")
+    statements = _statements(full, "WorkerPolicy")
     (tunnel,) = [s for s in statements if s.get("Sid") == "TunnelToHost"]
     assert _actions(tunnel) == ["ssm:StartSession"]
     assert tunnel["Condition"] == {"BoolIfExists": {"ssm:SessionDocumentAccessCheck": "true"}}
@@ -183,13 +201,18 @@ def test_instance_no_ssh_imdsv2_ami_resolved_at_launch(full):
     props = instance["Properties"]
     assert "KeyName" not in props
     assert props["ImageId"].startswith("resolve:ssm:/aws/service/ami-amazon-linux-latest/al2023")
-    assert props["InstanceType"] == "t3.small"
+    assert props["InstanceType"] == "t3.medium"
     full.has_resource_properties(
         "AWS::EC2::LaunchTemplate",
         {"LaunchTemplateData": {"MetadataOptions": {"HttpTokens": "required"}}},
     )
     user_data = json.dumps(props["UserData"])
     assert "mkfs.ext4" in user_data and "blkid" in user_data  # format only blank volumes
+    assert "mkswap /swapfile" in user_data
+    # First boot also brings up the app, after /data is mounted.
+    assert user_data.index("mount -a") < user_data.index("deploy/ec2/bootstrap.sh")
+    assert "git clone https://github.com/duytq5/duytq5-leaf-al-platform.git" in user_data
+    assert "AWS_REGION=" in user_data and '{"Ref": "AWS::Region"}' in user_data
 
 
 def test_no_nat_gateway(full):
@@ -205,8 +228,8 @@ def test_budget_only_with_email(full, bare):
 
 
 def test_context_overrides():
-    t = _template(instanceType="t3.medium", dataVolumeGb="30", budgetEmail="a@b.c", budgetUsd="35")
-    t.has_resource_properties("AWS::EC2::Instance", {"InstanceType": "t3.medium"})
+    t = _template(instanceType="t3.large", dataVolumeGb="30", budgetEmail="a@b.c", budgetUsd="35")
+    t.has_resource_properties("AWS::EC2::Instance", {"InstanceType": "t3.large"})
     t.has_resource_properties("AWS::EC2::Volume", {"Size": 30})
     t.has_resource_properties(
         "AWS::Budgets::Budget", {"Budget": {"BudgetLimit": {"Amount": 35, "Unit": "USD"}}}
