@@ -102,10 +102,6 @@ def test_scan_reads_folders_and_dedupes(tmp_path):
         (lambda p: __import__("shutil").rmtree(p / "b"), "no folder for labels"),
         (lambda p: (p / "a" / "x.png").write_bytes(b"\x89PNG"), "not JPEG"),
         (lambda p: (p / "a" / "x.jpg").write_bytes(b"\x89PNG"), "not JPEG"),
-        (
-            lambda p: (p / "b" / "dup.jpg").write_bytes((p / "a" / "0.jpg").read_bytes()),
-            "same image under",
-        ),
     ],
 )
 def test_scan_rejects(tmp_path, setup, message):
@@ -113,6 +109,19 @@ def test_scan_rejects(tmp_path, setup, message):
     setup(tmp_path)
     with pytest.raises(SeedError, match=message):
         scan(tmp_path, ["a", "b"])
+
+
+def test_scan_drops_images_filed_under_two_labels(tmp_path):
+    # Like RoCoLe: same-class copies count once, cross-class copies are left out.
+    make_folder(tmp_path, {"a": 3, "b": 2})
+    (tmp_path / "a" / "copy.jpg").write_bytes((tmp_path / "a" / "1.jpg").read_bytes())
+    (tmp_path / "b" / "dup.jpg").write_bytes((tmp_path / "a" / "0.jpg").read_bytes())
+    (tmp_path / "b" / "dup2.jpg").write_bytes((tmp_path / "a" / "0.jpg").read_bytes())
+    conflicting: set[str] = set()
+    images = scan(tmp_path, ["a", "b"], conflicting)
+    assert Counter(i.label for i in images) == {"a": 2, "b": 2}
+    assert len(conflicting) == 1
+    assert tmp_path / "a" / "0.jpg" not in {i.path for i in images}
 
 
 def test_scan_rejects_empty_label(tmp_path):

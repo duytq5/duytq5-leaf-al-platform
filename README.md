@@ -71,6 +71,8 @@ config. The seed uploads each image to `raw/<dataset>/<sha256>.jpg`, then record
 it with a split that is stratified per class and fixed by the split seed.
 With `split.group_pattern` (RoCoLe: `^(C\d+P\d+)`), all images of one plant
 land in the same split, so views of one leaf never sit in both train and test.
+Byte-identical copies count once, and an image filed under two classes is left
+out entirely (RoCoLe has 12 such pairs; the research code drops them too).
 Re-running it skips what is already there, and an image keeps its first split.
 The dataset config names its crop (`crop: coffee`); the seed adds or renames the
 crops listed in `configs/crops.yaml` and fails on an unknown crop code.
