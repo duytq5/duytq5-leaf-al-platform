@@ -104,7 +104,7 @@ def test_setup_clones_or_pulls_then_runs_bootstrap(tmp_path):
     assert proc.returncode == 0, proc.stderr
     (send,) = [c for c in calls if c.startswith("ssm send-command")]
     assert "git clone https://github.com/duytq5/duytq5-leaf-al-platform.git" in send
-    assert "pull --ff-only" in send
+    assert "reset -q --hard origin/main" in send
     assert send.index("mkswap /swapfile") < send.index("deploy/ec2/bootstrap.sh")
     assert "env AWS_REGION=ap-southeast-2 " in send
     assert send.index("git clone") < send.index("deploy/ec2/bootstrap.sh")

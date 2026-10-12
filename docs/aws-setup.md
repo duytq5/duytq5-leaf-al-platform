@@ -85,7 +85,7 @@ export CDK_DEFAULT_ACCOUNT=$(aws sts get-caller-identity --query Account --outpu
 | S3 models bucket (`al-models`) | Same, plus versioning (old versions expire after 90 days). Kept on `cdk destroy`. |
 | SQS job queue + dead-letter queue | 20 s long polling, 30 min visibility, 14-day retention, a job goes to the DLQ after 3 failed receives. |
 | IAM user for the GPU worker | SSM port forwarding to the host only (no shell), consume jobs, report Step Functions task results, read `raw/` and `manifests/`, write `scores/`, read/write `mlflow-artifacts/`. No access key: you create it (section 4). |
-| VPC + EC2 instance | One public subnet, no NAT gateway. Amazon Linux 2023, `t3.small`, IMDSv2, no SSH key: connect with Session Manager. Docker, compose and cron installed, then Postgres + MLflow started on first boot. |
+| VPC + EC2 instance | One public subnet, no NAT gateway. Amazon Linux 2023, `t3.medium` (2 vCPU, 4 GB), IMDSv2, no SSH key: connect with Session Manager. Docker, compose and cron installed, then Postgres + MLflow started on first boot. |
 | EBS data volume (`/data`) | gp3 20 GB, encrypted, mounted at `/data` on first boot. Kept when the instance or the stack is deleted. |
 | Security group | No inbound rules. You and the worker reach MLflow (5000) and Postgres (5432) through SSM port forwarding (section 3). |
 | SSM parameters | `/leaf-al/buckets/data`, `/leaf-al/buckets/models`, `/leaf-al/queues/jobs-url`. |
@@ -97,7 +97,7 @@ Deploy-time settings are CDK context values (`-c key=value`):
 | --- | --- | --- |
 | `budgetEmail` | none (no Budget) | Where Budget alerts go |
 | `budgetUsd` | `20` | Monthly budget in USD |
-| `instanceType` | `t3.small` | EC2 instance type (x86_64) |
+| `instanceType` | `t3.medium` | EC2 instance type (x86_64) |
 | `dataVolumeGb` | `20` | Size of the `/data` volume |
 
 ## 1. Secrets in SSM Parameter Store (before the first deploy)
@@ -190,7 +190,13 @@ scripts/ec2.sh setup     # from your machine: pull main on the host, rerun boots
 
 Run `scripts/ec2.sh setup` again whenever `deploy/ec2/` changes on main, and
 once on an instance created before first boot did this (it clones the repo if
-it is missing). It is safe to repeat.
+it is missing). It is safe to repeat. The host's checkout only tracks main:
+`setup` resets it to `origin/main`, so edits made on the host are dropped
+(`.env` is not tracked and stays).
+
+Changing `instanceType` on a deployed stack stops and starts the same instance
+(`/data` and the root disk stay), but first boot does not run again, so run
+`scripts/ec2.sh setup` after that deploy.
 
 Session Manager needs its plugin for the AWS CLI on your machine, once:
 `brew install --cask session-manager-plugin` on macOS, or see

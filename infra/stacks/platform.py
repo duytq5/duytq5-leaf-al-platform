@@ -12,7 +12,7 @@ depends on IAM, not on an IP address.
 Deploy-time settings come from CDK context (`cdk deploy -c key=value`):
   budgetEmail   where the Budget alert goes; no Budget is created without it
   budgetUsd     monthly budget in USD (default 20)
-  instanceType  EC2 instance type (default t3.small)
+  instanceType  EC2 instance type (default t3.medium)
   dataVolumeGb  size of the /data EBS volume (default 20)
 """
 
@@ -321,7 +321,9 @@ class PlatformStack(Stack):
             "Host",
             vpc=vpc,
             vpc_subnets=ec2.SubnetSelection(subnets=[subnet]),
-            instance_type=ec2.InstanceType(self.node.try_get_context("instanceType") or "t3.small"),
+            instance_type=ec2.InstanceType(
+                self.node.try_get_context("instanceType") or "t3.medium"
+            ),
             # Resolved by EC2 at launch, not by CloudFormation at deploy: a new
             # AMI release never replaces the running instance on `cdk deploy`.
             machine_image=ec2.MachineImage.resolve_ssm_parameter_at_launch(AL2023_AMI_PARAM),
@@ -464,8 +466,8 @@ def _host_setup_commands(volume_id: str, region: str) -> list[str]:
         f"curl -fsSL {gh}/buildx/releases/download/{DOCKER_BUILDX_VERSION}/"
         f"buildx-{DOCKER_BUILDX_VERSION}.linux-amd64 -o {plugins}/docker-buildx",
         f"chmod +x {plugins}/docker-compose {plugins}/docker-buildx",
-        # t3.small has 2 GB and no swap: building the MLflow image next to a
-        # running Postgres can starve the host until the SSM agent stops.
+        # Swap as a safety net: on t3.small (2 GB) a crash-looping MLflow next to
+        # Postgres starved the host until the SSM agent stopped answering.
         "if [ ! -f /swapfile ]; then dd if=/dev/zero of=/swapfile bs=1M count=2048 "
         "&& chmod 600 /swapfile && mkswap /swapfile; fi",
         "swapon /swapfile || true",
