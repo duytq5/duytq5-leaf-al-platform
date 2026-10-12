@@ -4,9 +4,10 @@
 # Secrets come from .env next to this file (gitignored). On EC2, write .env
 # from SSM Parameter Store before `docker compose up -d`; see docs/aws-setup.md.
 #
-# Postgres accepts network clients only over TLS (Lambdas connect from the
-# internet). The certificate and key are in ./tls: write-env.sh puts them there
-# from SSM on EC2; locally, run ./make-tls.sh once.
+# Postgres accepts network clients only over TLS. The server certificate and
+# key are in ./tls: write-env.sh puts them there from SSM on EC2; locally, run
+# ./make-tls.sh once. Clients pin the CA that signed it (tls/ca.crt, SSM
+# /leaf-al/postgres/tls-ca).
 #
 # All state lives under DATA_DIR. On EC2 that is a separate EBS volume mounted
 # at /data that is kept when the instance is terminated, so a new instance can
@@ -41,8 +42,9 @@ services:
       - ./postgres/pg_hba.conf:/etc/postgresql/pg_hba.conf:ro
       - ./tls:/tls:ro
     ports:
-      # Lambdas run outside a VPC, so Postgres is reachable from the internet:
-      # TLS + a strong password (pg_hba.conf), and the EC2 security group.
+      # The security group has no inbound rules: clients come through the SSM
+      # tunnel. How Lambdas reach it is decided with the first Lambda that
+      # needs Postgres. TLS + a strong password (pg_hba.conf) either way.
       - "5432:5432"
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]

@@ -111,19 +111,22 @@ aws ssm put-parameter --name /leaf-al/postgres/password --type SecureString \
   --value "$(openssl rand -hex 24)"
 ```
 
-Postgres only accepts TLS connections from the network (the Lambdas reach it
-over the internet). Make a self-signed certificate on your machine and store it
-next to the password. The key is a SecureString; the certificate is not secret
-and clients pin it:
+Postgres only accepts TLS connections from the network. Make its certificate
+on your machine and store it next to the password: a private CA that clients
+pin (`tls-ca`), and the server certificate it signed with its key (`tls-cert`,
+`tls-key`). The key is a SecureString; the certificates are not secret:
 
 ```bash
 deploy/ec2/make-tls.sh /tmp/leaf-al-tls
-aws ssm put-parameter --name /leaf-al/postgres/tls-key --type SecureString \
-  --value file:///tmp/leaf-al-tls/server.key
-aws ssm put-parameter --name /leaf-al/postgres/tls-cert --type String \
-  --value file:///tmp/leaf-al-tls/server.crt
+aws ssm put-parameter --overwrite --name /leaf-al/postgres/tls-key --type SecureString --value file:///tmp/leaf-al-tls/server.key
+aws ssm put-parameter --overwrite --name /leaf-al/postgres/tls-cert --type String --value file:///tmp/leaf-al-tls/server.crt
+aws ssm put-parameter --overwrite --name /leaf-al/postgres/tls-ca --type String --value file:///tmp/leaf-al-tls/ca.crt
 rm -r /tmp/leaf-al-tls
 ```
+
+To replace the certificate later (or the old self-signed one from before the
+CA), run the same block, then `scripts/ec2.sh setup`: it restarts Postgres
+when the certificate changed. Clients then download `tls-ca` again.
 
 The stack writes the bucket names and queue URL to SSM itself.
 
@@ -180,7 +183,7 @@ Nothing to do by hand on a new instance. First boot mounts `/data`, clones this
 repo to `/home/ec2-user/duytq5-leaf-al-platform` and runs
 `deploy/ec2/bootstrap.sh`, which writes `.env` from SSM, runs
 `docker compose up -d --build` and installs the nightly backup cron line. That
-needs the Postgres password and the two TLS parameters from section 1 to exist
+needs the Postgres password and the TLS parameters from section 1 to exist
 before the deploy.
 
 Check it a few minutes after the deploy (the first image build takes a while),
@@ -275,7 +278,7 @@ The tunnel is for you and the worker. The PR that adds the first Lambda that
 needs Postgres also decides how that Lambda reaches it.
 
 If the services already run from an earlier version of this repo, create the
-two TLS parameters (section 1), then from your machine:
+three TLS parameters (section 1), then from your machine:
 
 ```bash
 scripts/ec2.sh setup     # recreates Postgres with TLS; data is kept
@@ -292,16 +295,15 @@ aws ssm start-session --target <InstanceId> \
   --parameters portNumber=5432,localPortNumber=5432
 ```
 
-Then get the pinned certificate and build the connection string. The
-certificate is checked with `verify-ca`, so `localhost` works even though the
-certificate does not name it:
+Then get the CA certificate and build the connection string. The server
+certificate names `localhost`, so `verify-full` works through the tunnel:
 
 ```bash
-aws ssm get-parameter --name /leaf-al/postgres/tls-cert \
-  --query Parameter.Value --output text > postgres-server.crt
+aws ssm get-parameter --name /leaf-al/postgres/tls-ca \
+  --query Parameter.Value --output text > postgres-ca.crt
 PG_PASSWORD=$(aws ssm get-parameter --name /leaf-al/postgres/password \
   --with-decryption --query Parameter.Value --output text)
-export DATABASE_URL="postgresql://al:$PG_PASSWORD@localhost:5432/al?sslmode=verify-ca&sslrootcert=postgres-server.crt"
+export DATABASE_URL="postgresql://al:$PG_PASSWORD@localhost:5432/al?sslmode=verify-full&sslrootcert=$PWD/postgres-ca.crt"
 export DATA_BUCKET=$(aws ssm get-parameter --name /leaf-al/buckets/data \
   --query Parameter.Value --output text)
 ```

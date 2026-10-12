@@ -56,7 +56,9 @@ def test_writes_env_starts_compose_and_installs_one_cron_line(tmp_path):
         assert proc.returncode == 0, proc.stderr
     env_file = repo / "deploy" / "ec2" / ".env"
     assert f"POSTGRES_PASSWORD={SECRET}" in env_file.read_text()
-    assert "docker compose up -d --build" in (tmp_path / "calls.log").read_text()
+    calls = (tmp_path / "calls.log").read_text()
+    assert calls.count("docker compose up -d --build") == 2
+    assert calls.count("docker compose restart postgres") == 1  # same certificate the 2nd time
     lines = cron.read_text().splitlines()
     assert "5 * * * * other-job" in lines
     backups = [line for line in lines if "backup-postgres.sh" in line]

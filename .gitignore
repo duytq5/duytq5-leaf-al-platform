@@ -38,5 +38,7 @@ mlartifacts/
 .vscode/
 .DS_Store
 
-# Postgres TLS certificate and key (make-tls.sh, write-env.sh)
+# Postgres TLS certificate and key (make-tls.sh, write-env.sh), and the CA
+# copy a client downloads from SSM
 deploy/ec2/tls/
+*.crt
