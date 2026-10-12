@@ -157,9 +157,13 @@ class PlatformStack(Stack):
         the owner (docs/aws-setup.md), never by CloudFormation, so it does not
         end up in stack outputs or templates."""
         user = iam.User(self, "WorkerUser")
+        # A managed policy, not the user's inline policy: IAM caps a user's
+        # inline policies at 2,048 characters in total, a managed policy at 6,144.
+        self.worker_policy = iam.ManagedPolicy(self, "WorkerPolicy", users=[user])
+        policy = self.worker_policy
         data, models = self.data_bucket, self.models_bucket
 
-        user.add_to_policy(
+        policy.add_statements(
             iam.PolicyStatement(
                 sid="ConsumeJobs",
                 actions=[
@@ -174,7 +178,7 @@ class PlatformStack(Stack):
         )
         # These Step Functions actions do not support resource-level
         # permissions; the task token itself scopes what the worker can resume.
-        user.add_to_policy(
+        policy.add_statements(
             iam.PolicyStatement(
                 sid="ReportTaskResults",
                 actions=[
@@ -186,21 +190,21 @@ class PlatformStack(Stack):
             )
         )
         # train/score read images and manifests, score writes predictions.
-        user.add_to_policy(
+        policy.add_statements(
             iam.PolicyStatement(
                 sid="ReadTrainingData",
                 actions=["s3:GetObject"],
                 resources=[data.arn_for_objects("raw/*"), data.arn_for_objects("manifests/*")],
             )
         )
-        user.add_to_policy(
+        policy.add_statements(
             iam.PolicyStatement(
                 sid="WriteScores",
                 actions=["s3:GetObject", "s3:PutObject"],
                 resources=[data.arn_for_objects("scores/*")],
             )
         )
-        user.add_to_policy(
+        policy.add_statements(
             iam.PolicyStatement(
                 sid="ListDataPrefixes",
                 actions=["s3:ListBucket"],
@@ -209,14 +213,14 @@ class PlatformStack(Stack):
             )
         )
         # MLflow clients write artifacts straight to S3 (--no-serve-artifacts).
-        user.add_to_policy(
+        policy.add_statements(
             iam.PolicyStatement(
                 sid="MlflowArtifacts",
                 actions=["s3:GetObject", "s3:PutObject", "s3:DeleteObject"],
                 resources=[models.arn_for_objects("mlflow-artifacts/*")],
             )
         )
-        user.add_to_policy(
+        policy.add_statements(
             iam.PolicyStatement(
                 sid="ListMlflowArtifacts",
                 actions=["s3:ListBucket"],
@@ -224,7 +228,7 @@ class PlatformStack(Stack):
                 conditions={"StringLike": {"s3:prefix": ["mlflow-artifacts/*"]}},
             )
         )
-        user.add_to_policy(
+        policy.add_statements(
             iam.PolicyStatement(
                 sid="ReadSettings",
                 actions=["ssm:GetParameter", "ssm:GetParameters"],
@@ -378,7 +382,7 @@ class PlatformStack(Stack):
             resource="document",
             resource_name=PORT_FORWARDING_DOCUMENT,
         )
-        self.worker_user.add_to_policy(
+        self.worker_policy.add_statements(
             iam.PolicyStatement(
                 sid="TunnelToHost",
                 actions=["ssm:StartSession"],
@@ -388,7 +392,7 @@ class PlatformStack(Stack):
                 conditions={"BoolIfExists": {"ssm:SessionDocumentAccessCheck": "true"}},
             )
         )
-        self.worker_user.add_to_policy(
+        self.worker_policy.add_statements(
             iam.PolicyStatement(
                 sid="ManageOwnSessions",
                 actions=["ssm:TerminateSession", "ssm:ResumeSession"],
