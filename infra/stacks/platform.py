@@ -58,6 +58,8 @@ JOB_MAX_RECEIVES = 3
 AL2023_AMI_PARAM = "/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64"
 DOCKER_COMPOSE_VERSION = "v2.29.7"
 DOCKER_BUILDX_VERSION = "v0.17.1"
+REPO_URL = "https://github.com/duytq5/duytq5-leaf-al-platform.git"
+REPO_DIR = "/home/ec2-user/duytq5-leaf-al-platform"
 
 
 class PlatformStack(Stack):
@@ -364,7 +366,7 @@ class PlatformStack(Stack):
             device="/dev/sdf",
         )
 
-        user_data.add_commands(*_host_setup_commands(volume.volume_id))
+        user_data.add_commands(*_host_setup_commands(volume.volume_id, self.region))
         self._worker_tunnel(instance)
 
         CfnOutput(self, "InstanceId", value=instance.instance_id)
@@ -439,9 +441,12 @@ class PlatformStack(Stack):
         )
 
 
-def _host_setup_commands(volume_id: str) -> list[str]:
-    """First-boot setup: Docker + compose, cron (nightly backup), and /data on
-    the retained volume.
+def _host_setup_commands(volume_id: str, region: str) -> list[str]:
+    """First-boot setup: Docker + compose, cron, /data on the retained volume,
+    then the app: clone the repo and run deploy/ec2/bootstrap.sh (Postgres +
+    MLflow + nightly backup). The Postgres password must already be in SSM
+    (docs/aws-setup.md section 1); if it is not, this fails and is logged in
+    /var/log/cloud-init-output.log. Run `scripts/ec2.sh setup` to retry.
 
     The volume is found by its id (Nitro exposes it as an NVMe device whose
     serial is the id), so the device name does not matter. It is formatted
@@ -470,4 +475,6 @@ def _host_setup_commands(volume_id: str) -> list[str]:
         "grep -q 'LABEL=leaf-al-data' /etc/fstab || "
         "echo 'LABEL=leaf-al-data /data ext4 defaults,nofail 0 2' >> /etc/fstab",
         "mount -a",
+        f"[ -d {REPO_DIR}/.git ] || sudo -u ec2-user git clone {REPO_URL} {REPO_DIR}",
+        f"sudo -u ec2-user env AWS_REGION={region} {REPO_DIR}/deploy/ec2/bootstrap.sh",
     ]

@@ -6,6 +6,8 @@
 #   scripts/ec2.sh stop           back up Postgres to S3, then stop the instance
 #   scripts/ec2.sh stop --no-backup
 #   scripts/ec2.sh backup         back up Postgres to S3 (instance must be running)
+#   scripts/ec2.sh setup          clone or pull main on the host, then run
+#                                 deploy/ec2/bootstrap.sh (Postgres, MLflow, cron)
 #   scripts/ec2.sh status         instance state
 #   scripts/ec2.sh tunnel         MLflow on localhost:5000 via SSM (Ctrl-C closes)
 #   scripts/ec2.sh tunnel postgres
@@ -18,11 +20,12 @@ set -euo pipefail
 
 STACK=LeafAlPlatform
 REPO_DIR=/home/ec2-user/duytq5-leaf-al-platform
+REPO_URL=https://github.com/duytq5/duytq5-leaf-al-platform.git
 MLFLOW_PORT=5000
 POSTGRES_PORT=5432
 
 usage() {
-  sed -n '2,16p' "$0" | sed 's/^# \{0,1\}//'
+  sed -n '2,18p' "$0" | sed 's/^# \{0,1\}//'
   exit "${1:-0}"
 }
 
@@ -40,30 +43,48 @@ state() {
     --query 'Reservations[0].Instances[0].State.Name' --output text
 }
 
-backup() {
-  local id=$1 cmd status
-  echo "Backing up Postgres to S3..."
+# Run shell commands on the host as root through SSM Run Command and print
+# their output. Arguments: a label, then one or more commands (no double quotes).
+run_on_host() {
+  local id=$1 label=$2 cmd status params
+  shift 2
+  params=$(printf '"%s",' "$@")
+  echo "$label..."
   cmd=$(aws ssm send-command --instance-ids "$id" \
     --document-name AWS-RunShellScript \
-    --comment "leaf-al postgres backup" \
-    --parameters "commands=[\"sudo -u ec2-user $REPO_DIR/deploy/ec2/backup-postgres.sh\"]" \
+    --comment "leaf-al $label" \
+    --parameters "commands=[${params%,}]" \
     --query 'Command.CommandId' --output text)
-  # The waiter exits non-zero on failure; read the result either way.
-  aws ssm wait command-executed --command-id "$cmd" --instance-id "$id" || true
-  status=$(aws ssm get-command-invocation --command-id "$cmd" --instance-id "$id" \
-    --query 'Status' --output text)
+  # Poll instead of `aws ssm wait`, which gives up after 100 s; a first
+  # `docker compose up --build` takes longer.
+  while :; do
+    status=$(aws ssm get-command-invocation --command-id "$cmd" --instance-id "$id" \
+      --query 'Status' --output text 2>/dev/null || echo Pending)
+    case "$status" in Pending | InProgress | Delayed) sleep 5 ;; *) break ;; esac
+  done
   aws ssm get-command-invocation --command-id "$cmd" --instance-id "$id" \
     --query '[StandardOutputContent, StandardErrorContent]' --output text
   if [ "$status" != "Success" ]; then
-    echo "Backup failed ($status)." >&2
+    echo "$label failed ($status)." >&2
     return 1
   fi
+}
+
+backup() {
+  run_on_host "$1" "Backing up Postgres to S3" \
+    "sudo -u ec2-user $REPO_DIR/deploy/ec2/backup-postgres.sh"
+}
+
+setup() {
+  run_on_host "$1" "Setting up Postgres, MLflow and the nightly backup" \
+    "if [ -d $REPO_DIR/.git ]; then sudo -u ec2-user git -C $REPO_DIR pull --ff-only; else sudo -u ec2-user git clone $REPO_URL $REPO_DIR; fi" \
+    "sudo -u ec2-user env AWS_REGION=${AWS_REGION:?set AWS_REGION} $REPO_DIR/deploy/ec2/bootstrap.sh"
 }
 
 cmd=${1:-}
 case "$cmd" in
   -h | --help | help) usage 0 ;;
-  start | stop | backup | status | tunnel | shell) ;;
+  start | stop | backup | setup | status | tunnel | shell) ;;
   *) usage 1 >&2 ;;
 esac
 
@@ -95,6 +116,9 @@ case "$cmd" in
     ;;
   backup)
     backup "$id"
+    ;;
+  setup)
+    setup "$id"
     ;;
   status)
     echo "$id: $(state "$id")"
