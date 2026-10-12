@@ -1,15 +1,16 @@
 """Model manifest stored at edge/{model}/{version}/manifest.json.
 
 The app reads preprocessing and the label list from here instead of hardcoding
-them. `labels` is copied from the dataset's single label list; its order is the
-model's output order.
+them. `labels` is the class snapshot frozen when the model was trained (also
+stored as model_versions.labels): one {code, display_name} per output index,
+in output order, so the app can show readable names.
 """
 
-from typing import Literal
+from typing import Annotated, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import AfterValidator, BaseModel, ConfigDict, Field
 
-from common.types import Sha256
+from common.types import ClassCode, Sha256
 
 
 class Preprocess(BaseModel):
@@ -18,6 +19,23 @@ class Preprocess(BaseModel):
     input_size: tuple[int, int]
     mean: tuple[float, float, float]
     std: tuple[float, float, float]
+
+
+class ModelClass(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    code: ClassCode
+    display_name: str = Field(min_length=1)
+
+
+def _unique_codes(v: list[ModelClass]) -> list[ModelClass]:
+    if len({c.code for c in v}) != len(v):
+        raise ValueError("class codes must be unique")
+    return v
+
+
+# The class snapshot: one entry per model output index, in output order.
+ClassList = Annotated[list[ModelClass], Field(min_length=2), AfterValidator(_unique_codes)]
 
 
 class ModelManifest(BaseModel):
@@ -29,11 +47,4 @@ class ModelManifest(BaseModel):
     sha256: Sha256
     size_bytes: int = Field(gt=0)
     preprocess: Preprocess
-    labels: list[str] = Field(min_length=2)
-
-    @field_validator("labels")
-    @classmethod
-    def _unique_labels(cls, v: list[str]) -> list[str]:
-        if len(set(v)) != len(v):
-            raise ValueError("labels must be unique")
-        return v
+    labels: ClassList  # index = model output index

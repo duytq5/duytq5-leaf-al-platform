@@ -1,7 +1,12 @@
-"""SQS job messages sent by Step Functions (or the promote CLI) to the worker.
+"""SQS job messages sent by Step Functions to the worker.
 
-{"job_id": uuid, "type": "train | score | export", "task_token": str,
- "round_id": uuid, "spec": {...}}
+{"job_id": uuid, "type": "train | score | export", "image": str,
+ "task_token": str, "round_id": uuid | null, "spec": {...}}
+
+train and score come from the al-round state machine, export from the
+model-release state machine; all three carry a task token. `image` is the
+worker image built for the commit that started the round or release; the
+worker runs the job in it.
 
 SQS can deliver a message twice, so job handlers must be idempotent on job_id.
 """
@@ -13,6 +18,8 @@ from uuid import UUID
 from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, field_validator
 
 from common.config import TrainConfig
+from common.manifest import ClassList
+from common.types import WorkerImage
 
 
 class JobType(StrEnum):
@@ -28,6 +35,9 @@ class _Strict(BaseModel):
 class TrainSpec(_Strict):
     config: TrainConfig
     manifest_uri: str
+    # Output layer order; the round's Lambda stores the same list in
+    # model_versions.labels.
+    classes: ClassList
 
 
 class ScoreSpec(_Strict):
@@ -47,32 +57,32 @@ class ScoreSpec(_Strict):
 class ExportSpec(_Strict):
     model_uri: str
     output_prefix: str
+    labels: ClassList  # copied from model_versions.labels into manifest.json as is
 
 
 class _JobBase(_Strict):
     job_id: UUID
+    image: WorkerImage
+    task_token: str
 
 
 class TrainJob(_JobBase):
     type: Literal[JobType.TRAIN] = JobType.TRAIN
-    task_token: str
     round_id: UUID
     spec: TrainSpec
 
 
 class ScoreJob(_JobBase):
     type: Literal[JobType.SCORE] = JobType.SCORE
-    task_token: str
     round_id: UUID
     spec: ScoreSpec
 
 
 class ExportJob(_JobBase):
-    """Run by the promote CLI, which may not go through Step Functions."""
+    """Sent by the model-release state machine; a release has no round."""
 
     type: Literal[JobType.EXPORT] = JobType.EXPORT
-    task_token: str | None = None
-    round_id: UUID | None = None
+    round_id: None = None
     spec: ExportSpec
 
 

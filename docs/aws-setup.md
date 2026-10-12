@@ -111,6 +111,20 @@ aws ssm put-parameter --name /leaf-al/postgres/password --type SecureString \
   --value "$(openssl rand -hex 24)"
 ```
 
+Postgres only accepts TLS connections from the network (the Lambdas reach it
+over the internet). Make a self-signed certificate on your machine and store it
+next to the password. The key is a SecureString; the certificate is not secret
+and clients pin it:
+
+```bash
+deploy/ec2/make-tls.sh /tmp/leaf-al-tls
+aws ssm put-parameter --name /leaf-al/postgres/tls-key --type SecureString \
+  --value file:///tmp/leaf-al-tls/server.key
+aws ssm put-parameter --name /leaf-al/postgres/tls-cert --type String \
+  --value file:///tmp/leaf-al-tls/server.crt
+rm -r /tmp/leaf-al-tls
+```
+
 The stack writes the bucket names and queue URL to SSM itself.
 
 ## 2. CDK stack
@@ -166,7 +180,8 @@ Nothing to do by hand on a new instance. First boot mounts `/data`, clones this
 repo to `/home/ec2-user/duytq5-leaf-al-platform` and runs
 `deploy/ec2/bootstrap.sh`, which writes `.env` from SSM, runs
 `docker compose up -d --build` and installs the nightly backup cron line. That
-needs the Postgres password from section 1 to exist before the deploy.
+needs the Postgres password and the two TLS parameters from section 1 to exist
+before the deploy.
 
 Check it a few minutes after the deploy (the first image build takes a while),
 from your machine:
@@ -239,6 +254,10 @@ scripts/ec2.sh tunnel mlflow 5050 # another local port, see below
 scripts/ec2.sh shell             # Session Manager shell
 ```
 
+`write-env.sh` refuses a Postgres password shorter than 32 characters.
+Postgres rejects every network connection without TLS (`postgres/pg_hba.conf`),
+MLflow's included, and the tunnel does not change that.
+
 On macOS, port 5000 is taken by AirPlay Receiver (System Settings → General →
 AirDrop & Handoff). Turn it off, or use `scripts/ec2.sh tunnel mlflow 5050` and
 open `http://localhost:5050`.
@@ -254,6 +273,56 @@ next deploy creates new, empty buckets and a new data volume.
 
 The tunnel is for you and the worker. The PR that adds the first Lambda that
 needs Postgres also decides how that Lambda reaches it.
+
+If the services already run from an earlier version of this repo, create the
+two TLS parameters (section 1), then from your machine:
+
+```bash
+scripts/ec2.sh setup     # recreates Postgres with TLS; data is kept
+```
+
+## 3a. Database tables and seed data
+
+Run from your own machine. First open the Postgres tunnel from section 3 in a
+separate terminal and keep it running:
+
+```bash
+aws ssm start-session --target <InstanceId> \
+  --document-name AWS-StartPortForwardingSession \
+  --parameters portNumber=5432,localPortNumber=5432
+```
+
+Then get the pinned certificate and build the connection string. The
+certificate is checked with `verify-ca`, so `localhost` works even though the
+certificate does not name it:
+
+```bash
+aws ssm get-parameter --name /leaf-al/postgres/tls-cert \
+  --query Parameter.Value --output text > postgres-server.crt
+PG_PASSWORD=$(aws ssm get-parameter --name /leaf-al/postgres/password \
+  --with-decryption --query Parameter.Value --output text)
+export DATABASE_URL="postgresql://al:$PG_PASSWORD@localhost:5432/al?sslmode=verify-ca&sslrootcert=postgres-server.crt"
+export DATA_BUCKET=$(aws ssm get-parameter --name /leaf-al/buckets/data \
+  --query Parameter.Value --output text)
+```
+
+Create the tables, then seed each dataset. `<image-dir>` has one sub-folder of
+JPEGs per class, named by the class code in the dataset config (for RoCoLe:
+`coffee___healthy`, `coffee___red_spider_mite`, `coffee___rust`). The dataset
+config names its crop, which must be listed in `configs/crops.yaml`; the seed
+adds or renames those crops. Check the split with `--dry-run` first; both
+commands are safe to re-run if they stop half-way.
+
+```bash
+uv run al db migrate
+uv run al seed configs/datasets/rocole.yaml <rocole-dir> --dry-run
+uv run al seed configs/datasets/rocole.yaml <rocole-dir>
+```
+
+The seed uploads with your own AWS credentials: it needs `s3:PutObject` and
+`s3:GetObject` on `raw/*` and `s3:ListBucket` on the data bucket (an admin
+profile has them). There is no durian config yet: add
+`configs/datasets/durian.yaml` once its class list is settled.
 
 ## 4. Worker credentials (on the RTX 5070 machine)
 

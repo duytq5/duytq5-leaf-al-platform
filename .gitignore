@@ -37,3 +37,6 @@ mlartifacts/
 .idea/
 .vscode/
 .DS_Store
+
+# Postgres TLS certificate and key (make-tls.sh, write-env.sh)
+deploy/ec2/tls/

@@ -8,6 +8,8 @@ from pydantic import ValidationError
 from common import (
     CaptureRequest,
     CaptureResponse,
+    CropsResponse,
+    DeviceConfig,
     ExportJob,
     ModelManifest,
     ScoreJob,
@@ -38,71 +40,110 @@ def test_config_rejects_unknown_keys():
         TrainConfig.model_validate(bad)
 
 
-def test_parse_train_job_round_trip():
-    msg = {
+IMAGE = "ghcr.io/duytq5/duytq5-leaf-al-platform-worker:" + "b" * 40
+CLASSES = [
+    {"code": "healthy", "display_name": "Healthy"},
+    {"code": "rust", "display_name": "Coffee leaf rust"},
+]
+
+
+def _job(type_: str, spec: dict, **extra) -> dict:
+    return {
         "job_id": str(uuid4()),
-        "type": "train",
+        "type": type_,
+        "image": IMAGE,
         "task_token": "tok",
-        "round_id": str(uuid4()),
-        "spec": {
-            "config": _config_dict(),
-            "manifest_uri": "s3://al-data/manifests/durian/v7.parquet",
-        },
+        "spec": spec,
+    } | extra
+
+
+def _train() -> dict:
+    spec = {
+        "config": _config_dict(),
+        "manifest_uri": "s3://al-data/manifests/durian/v7.parquet",
+        "classes": CLASSES,
     }
-    job = parse_job(json.dumps(msg))
+    return _job("train", spec, round_id=str(uuid4()))
+
+
+def _export() -> dict:
+    spec = {
+        "model_uri": "models:/leaf-disease/3",
+        "output_prefix": "edge/leaf-disease/3/",
+        "labels": CLASSES,
+    }
+    return _job("export", spec)
+
+
+def test_parse_train_job_round_trip():
+    job = parse_job(json.dumps(_train()))
     assert isinstance(job, TrainJob)
+    assert [c.code for c in job.spec.classes] == ["healthy", "rust"]
     assert parse_job(job.model_dump_json()) == job
 
 
 def test_parse_score_job_defaults_to_probs():
-    msg = {
-        "job_id": str(uuid4()),
-        "type": "score",
-        "task_token": "tok",
-        "round_id": str(uuid4()),
-        "spec": {
-            "model_uri": "models:/leaf-disease/3",
-            "pool_manifest_uri": "s3://x/p.parquet",
-            "output_uri": "s3://x/scores/r/pool.parquet",
-        },
+    spec = {
+        "model_uri": "models:/leaf-disease/3",
+        "pool_manifest_uri": "s3://x/p.parquet",
+        "output_uri": "s3://x/scores/r/pool.parquet",
     }
-    job = parse_job(json.dumps(msg))
+    job = parse_job(json.dumps(_job("score", spec, round_id=str(uuid4()))))
     assert isinstance(job, ScoreJob)
     assert job.spec.outputs == {"probs"}
 
 
 def test_score_job_requires_probs():
-    msg = {
-        "job_id": str(uuid4()),
-        "type": "score",
-        "task_token": "tok",
-        "round_id": str(uuid4()),
-        "spec": {
-            "model_uri": "m",
-            "pool_manifest_uri": "p",
-            "output_uri": "o",
-            "outputs": ["embeddings"],
-        },
+    spec = {
+        "model_uri": "m",
+        "pool_manifest_uri": "p",
+        "output_uri": "o",
+        "outputs": ["embeddings"],
     }
     with pytest.raises(ValidationError):
-        parse_job(json.dumps(msg))
+        parse_job(json.dumps(_job("score", spec, round_id=str(uuid4()))))
 
 
-def test_train_job_requires_task_token_but_export_does_not():
-    train = {
-        "job_id": str(uuid4()),
-        "type": "train",
-        "round_id": str(uuid4()),
-        "spec": {"config": _config_dict(), "manifest_uri": "s3://x"},
-    }
+def test_parse_export_job():
+    job = parse_job(json.dumps(_export()))
+    assert isinstance(job, ExportJob)
+    assert job.round_id is None
+    assert job.spec.labels[1].display_name == "Coffee leaf rust"
+
+
+@pytest.mark.parametrize("make", [_train, _export])
+@pytest.mark.parametrize(
+    "mutate",
+    [
+        lambda j: j.pop("task_token"),  # every job resumes a state machine
+        lambda j: j.pop("image"),
+        lambda j: j.update(image=IMAGE.replace("b" * 40, "latest")),  # must pin a commit
+        lambda j: j.update(image="docker.io/someone/worker:" + "b" * 40),
+    ],
+)
+def test_jobs_need_a_task_token_and_a_pinned_worker_image(make, mutate):
+    job = make()
+    mutate(job)
     with pytest.raises(ValidationError):
-        parse_job(json.dumps(train))
-    export = {
-        "job_id": str(uuid4()),
-        "type": "export",
-        "spec": {"model_uri": "models:/leaf-disease/3", "output_prefix": "edge/leaf-disease/3/"},
-    }
-    assert isinstance(parse_job(json.dumps(export)), ExportJob)
+        parse_job(json.dumps(job))
+
+
+@pytest.mark.parametrize(
+    "classes",
+    [CLASSES[:1], [CLASSES[0], CLASSES[0]]],  # one class; duplicate codes
+)
+def test_job_class_lists_are_validated(classes):
+    train, export = _train(), _export()
+    train["spec"]["classes"] = classes
+    export["spec"]["labels"] = classes
+    for job in (train, export):
+        with pytest.raises(ValidationError):
+            parse_job(json.dumps(job))
+
+
+def test_export_job_has_no_round():
+    with pytest.raises(ValidationError):
+        parse_job(json.dumps(_export() | {"round_id": str(uuid4())}))
 
 
 def test_unknown_job_type_rejected():
@@ -118,8 +159,6 @@ def _capture() -> dict:
         "image": {"sha256": SHA, "content_type": "image/jpeg", "size": 842113},
         "inference": {
             "model_version": "leaf-disease/12",
-            "top1": "leaf_blight",
-            "confidence": 0.54,
             "probs": {"healthy": 0.31, "leaf_blight": 0.54, "algal_spot": 0.15},
         },
     }
@@ -127,7 +166,10 @@ def _capture() -> dict:
 
 def test_capture_request_from_doc_example():
     req = CaptureRequest.model_validate(_capture())
-    assert req.inference.top1 == "leaf_blight"
+    assert req.inference.probs["leaf_blight"] == 0.54
+    png = _capture()
+    png["image"]["content_type"] = "image/png"
+    CaptureRequest.model_validate(png)
 
 
 @pytest.mark.parametrize(
@@ -135,9 +177,14 @@ def test_capture_request_from_doc_example():
     [
         lambda c: c.update(captured_at="2026-09-29T08:12:00"),  # no timezone
         lambda c: c["image"].update(sha256="XYZ"),
-        lambda c: c["inference"].update(top1="rust"),  # not in probs
-        lambda c: c["inference"].update(confidence=1.5),
-        lambda c: c.update(device_id="phone-1"),  # comes from the JWT, not the body
+        lambda c: c["inference"].update(top1="leaf_blight"),  # computed by the server
+        lambda c: c["inference"].update(confidence=0.54),  # computed by the server
+        lambda c: c["inference"]["probs"].update(healthy=0.5),  # sum is 1.19
+        lambda c: c["inference"].update(probs={"healthy": 1.0}),  # one class
+        lambda c: c["inference"]["probs"].update({"Leaf Blight": 0.0}),  # not a class code
+        lambda c: c["image"].update(size=10 * 1024 * 1024 + 1),
+        lambda c: c["image"].update(content_type="image/heic"),
+        lambda c: c.update(user_sub="someone"),  # comes from the JWT, not the body
     ],
 )
 def test_capture_request_rejects_bad_input(mutate):
@@ -149,7 +196,11 @@ def test_capture_request_rejects_bad_input(mutate):
 
 def test_capture_response_upload_matches_status():
     cid = str(uuid4())
-    upload = {"url": "https://s3.example.com/put", "expires_in": 900}
+    upload = {
+        "url": "https://s3.example.com/put",
+        "headers": {"Content-Type": "image/jpeg"},
+        "expires_in": 900,
+    }
     ok = {"capture_id": cid, "status": "upload_required", "upload": upload}
     CaptureResponse.model_validate(ok)
     CaptureResponse.model_validate({"capture_id": cid, "status": "already_exists"})
@@ -157,6 +208,40 @@ def test_capture_response_upload_matches_status():
         CaptureResponse.model_validate({"capture_id": cid, "status": "upload_required"})
     with pytest.raises(ValidationError):
         CaptureResponse.model_validate(ok | {"status": "already_exists"})
+
+
+def test_device_config_from_doc_example():
+    doc = {
+        "dataset": "durian",
+        "model": "leaf-disease",
+        "version": 13,
+        "sha256": SHA,
+        "manifest_url": "https://s3.example.com/manifest.json",
+        "model_url": "https://s3.example.com/model.onnx",
+        "expires_in": 900,
+    }
+    assert DeviceConfig.model_validate(doc).version == 13
+    with pytest.raises(ValidationError):
+        DeviceConfig.model_validate(doc | {"manifest": {}})
+
+
+def test_crops_response_from_doc_example():
+    doc = {
+        "crops": [
+            {
+                "code": "coffee",
+                "display_name": "Cà phê",
+                "description": None,
+                "datasets": [
+                    {"name": "rocole", "display_name": "Lá cà phê (RoCoLe)", "version": 3}
+                ],
+            }
+        ]
+    }
+    assert CropsResponse.model_validate(doc).crops[0].datasets[0].version == 3
+    doc["crops"][0]["datasets"] = []  # a crop without a released dataset is left out
+    with pytest.raises(ValidationError):
+        CropsResponse.model_validate(doc)
 
 
 def _manifest() -> dict:
@@ -171,7 +256,11 @@ def _manifest() -> dict:
             "mean": [0.485, 0.456, 0.406],
             "std": [0.229, 0.224, 0.225],
         },
-        "labels": ["healthy", "leaf_blight", "algal_spot"],
+        "labels": [
+            {"code": "healthy", "display_name": "Healthy"},
+            {"code": "leaf_blight", "display_name": "Cháy lá"},
+            {"code": "algal_spot", "display_name": "Algal spot"},
+        ],
     }
 
 
@@ -180,9 +269,12 @@ def test_manifest_from_doc_example():
     assert m.preprocess.input_size == (256, 256)
 
 
-def test_manifest_rejects_duplicate_labels():
+def test_manifest_rejects_duplicate_class_codes():
     m = _manifest()
-    m["labels"] = ["healthy", "healthy"]
+    m["labels"] = [
+        {"code": "healthy", "display_name": "A"},
+        {"code": "healthy", "display_name": "B"},
+    ]
     with pytest.raises(ValidationError):
         ModelManifest.model_validate(m)
 

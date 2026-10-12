@@ -5,7 +5,9 @@ description = "POC active-learning MLOps platform for leaf-disease image classif
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
+    "boto3>=1.34",
     "numpy>=1.26",
+    "psycopg[binary]>=3.2",
     "pydantic>=2.7",
     "pyyaml>=6.0",
 ]
@@ -41,7 +43,7 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
-packages = ["cli", "common", "selection", "worker", "lambdas", "infra"]
+packages = ["cli", "common", "db", "selection", "worker", "lambdas", "infra"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

@@ -4,6 +4,10 @@
 # Secrets come from .env next to this file (gitignored). On EC2, write .env
 # from SSM Parameter Store before `docker compose up -d`; see docs/aws-setup.md.
 #
+# Postgres accepts network clients only over TLS (Lambdas connect from the
+# internet). The certificate and key are in ./tls: write-env.sh puts them there
+# from SSM on EC2; locally, run ./make-tls.sh once.
+#
 # All state lives under DATA_DIR. On EC2 that is a separate EBS volume mounted
 # at /data that is kept when the instance is terminated, so a new instance can
 # re-attach it and pick up where the old one stopped. MLflow artifacts are in S3.
@@ -12,6 +16,19 @@ services:
   postgres:
     image: postgres:16-alpine
     restart: unless-stopped
+    entrypoint: ["/start.sh"]
+    command:
+      - postgres
+      - -c
+      - ssl=on
+      - -c
+      - ssl_cert_file=/var/lib/postgresql/tls/server.crt
+      - -c
+      - ssl_key_file=/var/lib/postgresql/tls/server.key
+      - -c
+      - ssl_min_protocol_version=TLSv1.2
+      - -c
+      - hba_file=/etc/postgresql/pg_hba.conf
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-al}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
@@ -20,9 +37,12 @@ services:
     volumes:
       - ${DATA_DIR:?set DATA_DIR in .env}/postgres:/var/lib/postgresql/data
       - ./postgres/init:/docker-entrypoint-initdb.d:ro
+      - ./postgres/start.sh:/start.sh:ro
+      - ./postgres/pg_hba.conf:/etc/postgresql/pg_hba.conf:ro
+      - ./tls:/tls:ro
     ports:
-      # Lambdas run outside a VPC, so Postgres is reachable from the internet;
-      # the EC2 security group must restrict who can connect.
+      # Lambdas run outside a VPC, so Postgres is reachable from the internet:
+      # TLS + a strong password (pg_hba.conf), and the EC2 security group.
       - "5432:5432"
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
@@ -44,7 +64,7 @@ services:
       - server
       - --host=0.0.0.0
       - --port=5000
-      - --backend-store-uri=postgresql://${POSTGRES_USER:-al}:${POSTGRES_PASSWORD}@postgres:5432/${MLFLOW_DB:-mlflow}
+      - --backend-store-uri=postgresql://${POSTGRES_USER:-al}:${POSTGRES_PASSWORD}@postgres:5432/${MLFLOW_DB:-mlflow}?sslmode=require
       # Clients (the worker) write artifacts straight to S3 with their own credentials.
       - --default-artifact-root=s3://${MODELS_BUCKET:?set MODELS_BUCKET in .env}/mlflow-artifacts
       - --no-serve-artifacts
