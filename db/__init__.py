@@ -1,9 +1,10 @@
 """Postgres access for the CLI and Lambdas.
 
-The connection string comes from DATABASE_URL. Postgres on EC2 only accepts
-TLS connections from outside its host, so a remote URL looks like:
+The connection string comes from DATABASE_URL. Postgres on EC2 has no open
+port and only accepts TLS connections, so from your machine open the tunnel
+(`scripts/ec2.sh tunnel postgres`) and use:
 
-  postgresql://al:<password>@<ec2-ip>:5432/al?sslmode=verify-ca&sslrootcert=postgres-server.crt
+  postgresql://al:<password>@localhost:5432/al?sslmode=verify-ca&sslrootcert=postgres-server.crt
 
 The server certificate is self-signed and pinned with sslrootcert (it is in
 SSM at /leaf-al/postgres/tls-cert); see docs/aws-setup.md.
