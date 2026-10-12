@@ -442,7 +442,7 @@ class PlatformStack(Stack):
 
 
 def _host_setup_commands(volume_id: str, region: str) -> list[str]:
-    """First-boot setup: Docker + compose, cron, /data on the retained volume,
+    """First-boot setup: Docker + compose, cron, 2 GB swap, /data on the retained volume,
     then the app: clone the repo and run deploy/ec2/bootstrap.sh (Postgres +
     MLflow + nightly backup). The Postgres password must already be in SSM
     (docs/aws-setup.md section 1); if it is not, this fails and is logged in
@@ -464,6 +464,12 @@ def _host_setup_commands(volume_id: str, region: str) -> list[str]:
         f"curl -fsSL {gh}/buildx/releases/download/{DOCKER_BUILDX_VERSION}/"
         f"buildx-{DOCKER_BUILDX_VERSION}.linux-amd64 -o {plugins}/docker-buildx",
         f"chmod +x {plugins}/docker-compose {plugins}/docker-buildx",
+        # t3.small has 2 GB and no swap: building the MLflow image next to a
+        # running Postgres can starve the host until the SSM agent stops.
+        "if [ ! -f /swapfile ]; then dd if=/dev/zero of=/swapfile bs=1M count=2048 "
+        "&& chmod 600 /swapfile && mkswap /swapfile; fi",
+        "swapon /swapfile || true",
+        "grep -q '^/swapfile' /etc/fstab || echo '/swapfile none swap sw 0 0' >> /etc/fstab",
         "systemctl enable --now docker crond",
         "usermod -aG docker ec2-user",
         f"VOL={volume_id}",

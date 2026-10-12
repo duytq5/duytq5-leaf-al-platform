@@ -6,8 +6,8 @@
 #   scripts/ec2.sh stop           back up Postgres to S3, then stop the instance
 #   scripts/ec2.sh stop --no-backup
 #   scripts/ec2.sh backup         back up Postgres to S3 (instance must be running)
-#   scripts/ec2.sh setup          clone or pull main on the host, then run
-#                                 deploy/ec2/bootstrap.sh (Postgres, MLflow, cron)
+#   scripts/ec2.sh setup          add 2 GB swap if missing, clone or pull main on
+#                                 the host, run deploy/ec2/bootstrap.sh
 #   scripts/ec2.sh status         instance state
 #   scripts/ec2.sh tunnel         MLflow on localhost:5000 via SSM (Ctrl-C closes)
 #   scripts/ec2.sh tunnel postgres
@@ -78,7 +78,10 @@ backup() {
 }
 
 setup() {
-  run_on_host "$1" "Setting up Postgres, MLflow and the nightly backup" \
+  run_on_host "$1" "Setting up swap, Postgres, MLflow and the nightly backup" \
+    "[ -f /swapfile ] || { dd if=/dev/zero of=/swapfile bs=1M count=2048 && chmod 600 /swapfile && mkswap /swapfile; }" \
+    "swapon --show | grep -q /swapfile || swapon /swapfile" \
+    "grep -q '^/swapfile' /etc/fstab || echo '/swapfile none swap sw 0 0' >> /etc/fstab" \
     "if [ -d $REPO_DIR/.git ]; then sudo -u ec2-user git -C $REPO_DIR pull --ff-only; else sudo -u ec2-user git clone $REPO_URL $REPO_DIR; fi" \
     "sudo -u ec2-user env AWS_REGION=${AWS_REGION:?set AWS_REGION} $REPO_DIR/deploy/ec2/bootstrap.sh"
 }

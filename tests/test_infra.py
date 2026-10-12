@@ -208,6 +208,7 @@ def test_instance_no_ssh_imdsv2_ami_resolved_at_launch(full):
     )
     user_data = json.dumps(props["UserData"])
     assert "mkfs.ext4" in user_data and "blkid" in user_data  # format only blank volumes
+    assert "mkswap /swapfile" in user_data
     # First boot also brings up the app, after /data is mounted.
     assert user_data.index("mount -a") < user_data.index("deploy/ec2/bootstrap.sh")
     assert "git clone https://github.com/duytq5/duytq5-leaf-al-platform.git" in user_data
