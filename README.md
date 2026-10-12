@@ -53,7 +53,7 @@ the database tests against it:
 
 ```bash
 . deploy/ec2/.env
-export TEST_DATABASE_URL="postgresql://al:$POSTGRES_PASSWORD@127.0.0.1:5432/al?sslmode=verify-ca&sslrootcert=deploy/ec2/tls/server.crt"
+export TEST_DATABASE_URL="postgresql://al:$POSTGRES_PASSWORD@127.0.0.1:5432/al?sslmode=verify-full&sslrootcert=deploy/ec2/tls/ca.crt"
 uv run pytest                # without TEST_DATABASE_URL the database tests are skipped
 ```
 
