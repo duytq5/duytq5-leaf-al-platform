@@ -30,6 +30,7 @@ Deploy-time settings come from CDK context (`cdk deploy -c key=value`):
   mobileCallbackUrls  comma-separated sign-in redirects of the app (default leafal://auth/callback)
   adminCallbackUrls   comma-separated sign-in redirects of admin tools
                       (default http://localhost:8080/auth/callback)
+  uploadDailyLimit    images one app user may send in any 24 hours (default 100)
   labelStudioDomain   Label Studio's host name (default <Elastic IP>.sslip.io,
                       a free name that resolves to the IP, so Caddy can get a
                       Let's Encrypt certificate without owning a domain)
@@ -117,6 +118,7 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 LAMBDAS_DIR = REPO_ROOT / "lambdas"
 # GET routes of the app that need no sign-in (design doc, Edge API).
 PUBLIC_ROUTES = ("/v1/crops", "/v1/devices/config")
+DEFAULT_UPLOAD_DAILY_LIMIT = 100
 # Per-client limits on the whole API (requests per second, burst).
 API_RATE_LIMIT = 10
 API_BURST_LIMIT = 20
@@ -734,9 +736,15 @@ class PlatformStack(Stack):
         (`api.auth.require_groups`). The app's catalog (`PUBLIC_ROUTES`) needs
         no token, so every install gets model updates; API Gateway throttles it.
 
-        The Lambda reads Postgres, so it runs in the Lambda subnet; it signs
-        S3 download links locally and needs no other AWS call.
+        The Lambda reads and writes Postgres, so it runs in the Lambda subnet;
+        it signs S3 download and upload links locally and needs no other AWS
+        call.
         """
+        upload_limit = int(
+            self.node.try_get_context("uploadDailyLimit") or DEFAULT_UPLOAD_DAILY_LIMIT
+        )
+        if upload_limit < 1:
+            raise ValueError("uploadDailyLimit must be at least 1")
         log_group = logs.LogGroup(
             self,
             "ApiLogs",
@@ -760,13 +768,22 @@ class PlatformStack(Stack):
             environment={
                 **self._postgres_environment(),
                 "MODELS_BUCKET": self.models_bucket.bucket_name,
+                "DATA_BUCKET": self.data_bucket.bucket_name,
+                # A deploy setting: the Lambda has no route to SSM.
+                "UPLOAD_DAILY_LIMIT": str(upload_limit),
             },
             log_group=log_group,
         )
-        # Presigned download links work only for what the signer may read.
+        # Presigned links work only for what the signer may do: download
+        # released models, upload app images to incoming/.
         fn.add_to_role_policy(
             iam.PolicyStatement(
                 actions=["s3:GetObject"], resources=[self.models_bucket.arn_for_objects("edge/*")]
+            )
+        )
+        fn.add_to_role_policy(
+            iam.PolicyStatement(
+                actions=["s3:PutObject"], resources=[self.data_bucket.arn_for_objects("incoming/*")]
             )
         )
         authorizer = apigw_auth.HttpUserPoolAuthorizer(
