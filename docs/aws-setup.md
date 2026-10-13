@@ -90,6 +90,8 @@ export CDK_DEFAULT_ACCOUNT=$(aws sts get-caller-identity --query Account --outpu
 | Security group | No inbound rules. You and the worker reach MLflow (5000) and Postgres (5432) through SSM port forwarding (section 3). |
 | SSM parameters | `/leaf-al/buckets/data`, `/leaf-al/buckets/models`, `/leaf-al/queues/jobs-url`. |
 | AWS Budget | Monthly cost budget, email at 80 % actual and 100 % forecast. Only created when `budgetEmail` is set. |
+| Cognito user pool | Sign-in for people (section 6). Groups `admins`, `labelers`, `uploaders`; self sign-up off; email sign-in; optional TOTP MFA; hosted login domain; public PKCE clients `mobile` and `admin-web`. Kept on `cdk destroy`. |
+| Post-confirmation Lambda | Adds users who signed in with Google to `uploaders`. Logs kept 30 days. |
 
 Deploy-time settings are CDK context values (`-c key=value`):
 
@@ -99,6 +101,10 @@ Deploy-time settings are CDK context values (`-c key=value`):
 | `budgetUsd` | `20` | Monthly budget in USD |
 | `instanceType` | `t3.medium` | EC2 instance type (x86_64) |
 | `dataVolumeGb` | `20` | Size of the `/data` volume |
+| `authDomainPrefix` | `leaf-al-<account id>` | Prefix of the Cognito login domain (`https://<prefix>.auth.<region>.amazoncognito.com`) |
+| `googleClientId` | none (no Google sign-in) | Google OAuth client id (section 6) |
+| `mobileCallbackUrls` | `leafal://auth/callback` | Comma-separated sign-in redirects of the app |
+| `adminCallbackUrls` | `http://localhost:8080/auth/callback` | Comma-separated sign-in redirects of admin tools |
 
 ## 1. Secrets in SSM Parameter Store (before the first deploy)
 
@@ -154,7 +160,8 @@ AWS sends a confirmation email for the Budget alert subscription; confirm it.
 
 The deploy prints these outputs; you need them below:
 `DataBucketName`, `ModelsBucketName`, `JobQueueUrl`, `JobDlqUrl`,
-`WorkerUserName`, `InstanceId`, `DataVolumeId`.
+`WorkerUserName`, `InstanceId`, `DataVolumeId`, `UserPoolId`,
+`MobileClientId`, `AdminWebClientId`, `AuthDomainUrl`.
 
 ```bash
 aws cloudformation describe-stacks --stack-name LeafAlPlatform \
@@ -375,8 +382,45 @@ aws s3 cp s3://<DataBucketName>/backups/postgres/<file>.sql.gz - | gunzip \
   | docker compose exec -T postgres psql -U al -d postgres
 ```
 
-## 6. Later in Phase 1
+## 6. Sign-in (Cognito)
 
-The `al-round` state machine, the selection, oracle, snapshot and merge
-Lambdas, and Cognito are added to the same stack by later PRs; this file gets
-their steps as they land.
+Cognito signs people in; machines keep IAM. Who belongs where:
+
+| Group | Who | How they get in |
+| --- | --- | --- |
+| `admins` | You | You create the account (below) |
+| `labelers` | People labeling in Label Studio | You create the account |
+| `uploaders` | App users who send images | Automatic on their first Google sign-in |
+
+Operators and ML engineers are GitHub roles (CODEOWNERS on the repo), not
+Cognito groups.
+
+### Create an admin or labeler
+
+```bash
+POOL_ID=$(aws cloudformation describe-stacks --stack-name LeafAlPlatform --query "Stacks[0].Outputs[?OutputKey=='UserPoolId'].OutputValue" --output text)
+aws cognito-idp admin-create-user --user-pool-id "$POOL_ID" --username you@example.com --user-attributes Name=email,Value=you@example.com Name=email_verified,Value=true
+aws cognito-idp admin-add-user-to-group --user-pool-id "$POOL_ID" --username you@example.com --group-name admins
+```
+
+Cognito emails a temporary password; the first sign-in asks for a new one.
+Turn on TOTP MFA for admin accounts from the login page after first sign-in.
+Use `--group-name labelers` for labelers.
+
+### Google sign-in for the app (when the app is ready)
+
+1. In Google Cloud Console, create an OAuth client of type "Web application".
+   Authorized redirect URI: `<AuthDomainUrl>/oauth2/idpresponse`.
+2. Store its client secret in Secrets Manager (about $0.40 a month):
+
+   ```bash
+   aws secretsmanager create-secret --name leaf-al/google-client-secret --secret-string '<client secret>'
+   ```
+
+3. Deploy with `-c googleClientId=<client id>` added to `CTX`, and keep it on
+   every later deploy (without it, Google sign-in is removed).
+
+## 7. Later
+
+The API, the `al-round` state machine and its Lambdas are added to the same
+stack by later PRs; this file gets their steps as they land.
