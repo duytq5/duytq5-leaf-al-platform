@@ -43,6 +43,9 @@ from aws_cdk import (
     Tags,
     Validations,
 )
+from aws_cdk import aws_apigatewayv2 as apigw
+from aws_cdk import aws_apigatewayv2_authorizers as apigw_auth
+from aws_cdk import aws_apigatewayv2_integrations as apigw_int
 from aws_cdk import aws_budgets as budgets
 from aws_cdk import aws_cognito as cognito
 from aws_cdk import aws_ec2 as ec2
@@ -54,6 +57,7 @@ from aws_cdk import aws_sqs as sqs
 from aws_cdk import aws_ssm as ssm
 from constructs import Construct
 
+from infra import lambda_code
 from infra.stacks.al_round import AlRound
 
 # SSM Parameter Store layout. deploy/ec2/write-env.sh reads the same names.
@@ -91,7 +95,11 @@ REPO_DIR = "/home/ec2-user/duytq5-leaf-al-platform"
 # subnet sits on a second range; the host and its subnet stay as they are.
 LAMBDA_CIDR = "10.1.0.0/24"
 
-LAMBDAS_DIR = Path(__file__).resolve().parents[2] / "lambdas"
+REPO_ROOT = Path(__file__).resolve().parents[2]
+LAMBDAS_DIR = REPO_ROOT / "lambdas"
+# Per-client limits on the whole API (requests per second, burst).
+API_RATE_LIMIT = 10
+API_BURST_LIMIT = 20
 
 # Cognito groups (design doc, Authentication and authorization). Operator and
 # ML engineer are GitHub roles (CODEOWNERS), not Cognito groups.
@@ -158,6 +166,7 @@ class PlatformStack(Stack):
         self._al_round()
         self._budget(ctx("budgetEmail"), float(ctx("budgetUsd") or 20))
         self._auth(ctx)
+        self._api()
 
         CfnOutput(self, "DataBucketName", value=self.data_bucket.bucket_name)
         CfnOutput(self, "ModelsBucketName", value=self.models_bucket.bucket_name)
@@ -645,6 +654,49 @@ class PlatformStack(Stack):
         if google:
             client.node.add_dependency(google)
         return client
+
+    def _api(self) -> None:
+        """HTTP API in front of one FastAPI Lambda.
+
+        Every route needs a Cognito access token from the `mobile` or
+        `admin-web` client: the JWT authorizer checks signature, issuer,
+        client id and expiry and answers 401 itself. The Lambda then checks
+        groups (`api.auth.require_groups`). Public routes (`/v1/crops`,
+        `/v1/devices/config`) will be added with no authorizer when built.
+        """
+        log_group = logs.LogGroup(
+            self,
+            "ApiLogs",
+            retention=logs.RetentionDays.ONE_MONTH,
+            removal_policy=RemovalPolicy.DESTROY,
+        )
+        fn = lambda_.Function(
+            self,
+            "ApiFn",
+            runtime=lambda_code.RUNTIME,
+            architecture=lambda_.Architecture.X86_64,
+            handler="api.app.handler",
+            code=lambda_code.API.code(),
+            memory_size=512,
+            timeout=Duration.seconds(10),
+            log_group=log_group,
+        )
+        authorizer = apigw_auth.HttpUserPoolAuthorizer(
+            "CognitoAuthorizer",
+            self.user_pool,
+            user_pool_clients=[self.mobile_client, self.admin_web_client],
+        )
+        api = apigw.HttpApi(self, "Api", default_authorizer=authorizer)
+        api.add_routes(
+            path="/v1/{proxy+}",
+            methods=[apigw.HttpMethod.ANY],
+            integration=apigw_int.HttpLambdaIntegration("ApiIntegration", fn),
+        )
+        stage: apigw.CfnStage = api.default_stage.node.default_child
+        stage.default_route_settings = apigw.CfnStage.RouteSettingsProperty(
+            throttling_rate_limit=API_RATE_LIMIT, throttling_burst_limit=API_BURST_LIMIT
+        )
+        CfnOutput(self, "ApiUrl", value=api.api_endpoint)
 
     def _post_confirmation_fn(self) -> lambda_.Function:
         log_group = logs.LogGroup(

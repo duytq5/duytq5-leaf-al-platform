@@ -46,7 +46,7 @@ class AlRound(Construct):
         job_queue: sqs.IQueue,
     ) -> None:
         super().__init__(scope, construct_id)
-        code = lambda_code.code()
+        code = lambda_code.ROUND.code()
 
         def step(name: str, handler: str, timeout: int = 60, memory: int = 512):
             fn = lambda_.Function(

@@ -94,6 +94,7 @@ export CDK_DEFAULT_ACCOUNT=$(aws sts get-caller-identity --query Account --outpu
 | AWS Budget | Monthly cost budget, email at 80 % actual and 100 % forecast. Only created when `budgetEmail` is set. |
 | Cognito user pool | Sign-in for people (section 6). Groups `admins`, `labelers`, `uploaders`; self sign-up off; email sign-in; optional TOTP MFA; hosted login domain; public PKCE clients `mobile` and `admin-web`. Kept on `cdk destroy`. |
 | Post-confirmation Lambda | Adds users who signed in with Google to `uploaders`. Logs kept 30 days. |
+| HTTP API + API Lambda | API Gateway HTTP API; every route needs a Cognito access token (JWT authorizer, 401 without one), throttled to 10 requests/s (burst 20). One FastAPI Lambda (`api/`) checks groups. Logs kept 30 days. |
 
 Deploy-time settings are CDK context values (`-c key=value`):
 
@@ -174,7 +175,10 @@ AWS sends a confirmation email for the Budget alert subscription; confirm it.
 The deploy prints these outputs; you need them below:
 `DataBucketName`, `ModelsBucketName`, `JobQueueUrl`, `JobDlqUrl`,
 `WorkerUserName`, `InstanceId`, `DataVolumeId`, `UserPoolId`,
-`MobileClientId`, `AdminWebClientId`, `AuthDomainUrl`.
+`MobileClientId`, `AdminWebClientId`, `AuthDomainUrl`, `ApiUrl`.
+
+`cdk deploy` builds the API Lambda bundle with `uv` (Linux wheels, no Docker
+needed); without `uv` on the PATH it falls back to Docker.
 
 ```bash
 aws cloudformation describe-stacks --stack-name LeafAlPlatform \
@@ -435,6 +439,17 @@ Use `--group-name labelers` for labelers.
 
 3. Deploy with `-c googleClientId=<client id>` added to `CTX`, and keep it on
    every later deploy (without it, Google sign-in is removed).
+
+### Check the API
+
+```bash
+API_URL=$(aws cloudformation describe-stacks --stack-name LeafAlPlatform --query "Stacks[0].Outputs[?OutputKey=='ApiUrl'].OutputValue" --output text)
+curl -i "$API_URL/v1/me"
+```
+
+Without a token the answer is `401` from API Gateway. With an access token
+from the login page (`Authorization: Bearer <token>`), `/v1/me` returns your
+`sub`, username and groups.
 
 ## 7. Later
 

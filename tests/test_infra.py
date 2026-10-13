@@ -345,8 +345,8 @@ def test_context_overrides():
 
 
 def test_lambda_libraries_are_pinned_to_the_lock_file():
-    from infra.lambda_code import pinned_requirements
+    from infra.lambda_code import ROUND
 
-    reqs = pinned_requirements()
+    reqs = ROUND.requirements()
     assert {r.split("==")[0] for r in reqs} >= {"psycopg-binary", "pyarrow", "pydantic"}
     assert all("==" in r for r in reqs)

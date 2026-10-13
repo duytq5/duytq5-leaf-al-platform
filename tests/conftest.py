@@ -1,12 +1,13 @@
+import json
 import os
 import uuid
 from urllib.parse import urlsplit, urlunsplit
 
 import pytest
 
-# Template tests check CloudFormation, not Lambda code assets: skip bundling
-# them (it downloads Linux wheels). cdk.App reads this variable.
-os.environ.setdefault("CDK_CONTEXT_JSON", '{"aws:cdk:bundling-stacks": []}')
+# CDK template tests don't build Lambda bundles (that downloads Linux wheels);
+# cdk.App reads this variable. The API bundle is tested in tests/test_api_infra.py.
+os.environ.setdefault("CDK_CONTEXT_JSON", json.dumps({"aws:cdk:bundling-stacks": []}))
 
 
 @pytest.fixture
