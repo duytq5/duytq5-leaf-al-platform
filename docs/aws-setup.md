@@ -97,6 +97,7 @@ export CDK_DEFAULT_ACCOUNT=$(aws sts get-caller-identity --query Account --outpu
 | Post-confirmation Lambda | Adds users who signed in with Google to `uploaders`. Logs kept 30 days. |
 | HTTP API + API Lambda | API Gateway HTTP API; every route needs a Cognito access token (JWT authorizer, 401 without one) except the app's public `GET /v1/crops` and `GET /v1/devices/config`; throttled to 10 requests/s (burst 20). One FastAPI Lambda (`api/`) checks groups; it runs in the Lambdas' subnet to use Postgres, signs download links for `edge/` in the models bucket, and signs upload links for `incoming/` in the data bucket (`POST /v1/captures`, `uploaders` only, at most `uploadDailyLimit` images per user in 24 hours, default 100). While the EC2 host is stopped it answers `503`. Logs kept 30 days. |
 | Label Studio webhook | `POST /v1/hooks/label-studio` on the same API, no token: Label Studio sends the shared secret header instead. A Lambda outside the VPC checks it, has a Lambda in the VPC store the label, and resumes the round once all k images are done. |
+| Upload validation | App images land in `incoming/` of the data bucket; S3 notifies the `UploadQueue` (SQS), and `UploadFn` in the Lambdas' subnet checks each one (a whole JPEG or PNG of the declared type and SHA-256), turns it upright, strips EXIF, writes it to `raw/{dataset}/` and adds it to the train pool. Refused files are deleted. While the host is stopped, messages retry every 15 minutes for about a day, then wait 14 days in `UploadDlq`; unprocessed files in `incoming/` expire after 14 days. |
 
 Deploy-time settings are CDK context values (`-c key=value`):
 
@@ -513,6 +514,16 @@ curl -s "$API_URL/v1/devices/config?dataset=rocole"
 
 `/v1/crops` lists only datasets with a released model, so it is `{"crops": []}`
 and `/v1/devices/config` is `404` until the first model release.
+
+### Uploads stuck in the DLQ
+
+If the host was stopped for more than a day, some uploads wait in the DLQ.
+With the host running, move them back:
+
+```bash
+DLQ_URL=$(aws cloudformation describe-stacks --stack-name LeafAlPlatform --query "Stacks[0].Outputs[?OutputKey=='UploadDlqUrl'].OutputValue" --output text)
+aws sqs start-message-move-task --source-arn $(aws sqs get-queue-attributes --queue-url "$DLQ_URL" --attribute-names QueueArn --query Attributes.QueueArn --output text)
+```
 
 ## 7. Later
 
