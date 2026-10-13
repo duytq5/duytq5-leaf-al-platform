@@ -70,6 +70,7 @@ from constructs import Construct
 
 from infra import lambda_code
 from infra.stacks.al_round import AlRound
+from infra.stacks.model_release import STATE_MACHINE_NAME as RELEASE_STATE_MACHINE
 from infra.stacks.model_release import ModelRelease
 
 # SSM Parameter Store layout. deploy/ec2/write-env.sh reads the same names.
@@ -118,7 +119,10 @@ UPLOAD_RETENTION = Duration.days(14)
 AL2023_AMI_PARAM = "/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64"
 DOCKER_COMPOSE_VERSION = "v2.29.7"
 DOCKER_BUILDX_VERSION = "v0.17.1"
-REPO_URL = "https://github.com/duytq5/duytq5-leaf-al-platform.git"
+GITHUB_REPO = "duytq5/duytq5-leaf-al-platform"
+REPO_URL = f"https://github.com/{GITHUB_REPO}.git"
+GITHUB_OIDC_HOST = "token.actions.githubusercontent.com"
+GITHUB_ROLE_NAME = "leaf-al-github-actions"
 REPO_DIR = "/home/ec2-user/duytq5-leaf-al-platform"
 # The host's subnet already spans the VPC's 10.0.0.0/16, so the Lambdas' private
 # subnet sits on a second range; the host and its subnet stay as they are.
@@ -197,6 +201,7 @@ class PlatformStack(Stack):
         self._lambda_network()
         self._al_round()
         self._model_release()
+        self._github_actions()
         self._budget(ctx("budgetEmail"), float(ctx("budgetUsd") or 20))
         self._auth(ctx)
         self._api()
@@ -594,6 +599,64 @@ class PlatformStack(Stack):
             self, "ModelReleaseArnParam", parameter_name=SSM_MODEL_RELEASE_ARN, string_value=arn
         )
         CfnOutput(self, "ModelReleaseStateMachineArn", value=arn)
+
+    def _github_actions(self) -> None:
+        """The IAM role GitHub Actions assumes with its OIDC token (design doc,
+        "Control through GitHub"): no AWS keys are stored in GitHub, and only
+        workflow runs on `main` of this repository get the role, so a pull
+        request (forks included) never runs with AWS access.
+
+        An account has one OIDC provider per URL: pass `-c
+        githubOidcProviderArn=...` to reuse one made outside this stack.
+        """
+        existing = self.node.try_get_context("githubOidcProviderArn")
+        if existing:
+            provider_arn = existing
+        else:
+            provider = iam.OidcProviderNative(
+                self,
+                "GithubOidc",
+                url=f"https://{GITHUB_OIDC_HOST}",
+                client_ids=["sts.amazonaws.com"],
+            )
+            provider_arn = provider.oidc_provider_arn
+        role = iam.Role(
+            self,
+            "GithubActionsRole",
+            role_name=GITHUB_ROLE_NAME,
+            assumed_by=iam.WebIdentityPrincipal(
+                provider_arn,
+                conditions={
+                    "StringEquals": {
+                        f"{GITHUB_OIDC_HOST}:aud": "sts.amazonaws.com",
+                        f"{GITHUB_OIDC_HOST}:sub": f"repo:{GITHUB_REPO}:ref:refs/heads/main",
+                    }
+                },
+            ),
+            # The release workflow keeps polling while the worker exports.
+            max_session_duration=Duration.hours(7),
+        )
+        machine = self.model_release.state_machine
+        machine.grant_start_execution(role)
+        role.add_to_policy(
+            iam.PolicyStatement(
+                actions=["states:DescribeExecution"],
+                resources=[
+                    self.format_arn(
+                        service="states",
+                        resource="execution",
+                        resource_name=f"{RELEASE_STATE_MACHINE}:*",
+                        arn_format=ArnFormat.COLON_RESOURCE_NAME,
+                    )
+                ],
+            )
+        )
+        role.add_to_policy(
+            iam.PolicyStatement(
+                actions=["ssm:GetParameter"], resources=[self._param_arn(SSM_MODEL_RELEASE_ARN)]
+            )
+        )
+        CfnOutput(self, "GithubActionsRoleArn", value=role.role_arn)
 
     def _worker_tunnel(self, instance: ec2.Instance) -> None:
         """Let the worker open SSM port-forwarding sessions to the host (MLflow,

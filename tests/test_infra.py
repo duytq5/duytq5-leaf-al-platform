@@ -442,3 +442,57 @@ def test_lambda_libraries_are_pinned_to_the_lock_file():
     reqs = ROUND.requirements()
     assert {r.split("==")[0] for r in reqs} >= {"psycopg-binary", "pyarrow", "pydantic"}
     assert all("==" in r for r in reqs)
+
+
+# GitHub Actions (design doc "Control through GitHub")
+
+
+def _github_role(template: Template) -> dict:
+    (role,) = [
+        r["Properties"]
+        for k, r in template.find_resources("AWS::IAM::Role").items()
+        if k.startswith("GithubActionsRole")
+    ]
+    return role
+
+
+def test_github_oidc_provider(full):
+    (provider,) = full.find_resources("AWS::IAM::OIDCProvider").values()
+    assert provider["Properties"]["Url"] == "https://token.actions.githubusercontent.com"
+    assert provider["Properties"]["ClientIdList"] == ["sts.amazonaws.com"]
+
+
+def test_only_main_of_this_repo_may_assume_the_github_role(full):
+    role = _github_role(full)
+    assert role["RoleName"] == "leaf-al-github-actions"
+    (stmt,) = role["AssumeRolePolicyDocument"]["Statement"]
+    assert stmt["Action"] == "sts:AssumeRoleWithWebIdentity"
+    assert stmt["Condition"] == {
+        "StringEquals": {
+            "token.actions.githubusercontent.com:aud": "sts.amazonaws.com",
+            # Not pull requests, other branches or forks: only what merged to main.
+            "token.actions.githubusercontent.com:sub": (
+                "repo:duytq5/duytq5-leaf-al-platform:ref:refs/heads/main"
+            ),
+        }
+    }
+    # The release workflow waits up to 6 hours on the export.
+    assert role["MaxSessionDuration"] >= 7 * 3600
+
+
+def test_github_role_may_only_run_releases(full):
+    statements = _statements(full, "GithubActionsRoleDefaultPolicy")
+    actions = {a: json.dumps(s["Resource"]) for s in statements for a in _actions(s)}
+    assert set(actions) == {"states:StartExecution", "states:DescribeExecution", "ssm:GetParameter"}
+    assert "ModelReleaseStateMachine" in actions["states:StartExecution"]
+    assert ":execution:model-release:*" in actions["states:DescribeExecution"]
+    assert "/leaf-al/state-machines/model-release" in actions["ssm:GetParameter"]
+    assert "GithubActionsRoleArn" in full.to_json()["Outputs"]
+
+
+def test_an_existing_github_oidc_provider_is_reused():
+    arn = "arn:aws:iam::123456789012:oidc-provider/token.actions.githubusercontent.com"
+    template = _template(githubOidcProviderArn=arn)
+    template.resource_count_is("AWS::IAM::OIDCProvider", 0)
+    (stmt,) = _github_role(template)["AssumeRolePolicyDocument"]["Statement"]
+    assert stmt["Principal"] == {"Federated": arn}

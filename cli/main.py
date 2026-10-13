@@ -8,7 +8,7 @@ from pydantic import ValidationError
 
 from common.config import TrainConfig
 from common.dataset import CropsConfig, DatasetConfig
-from common.release import RELEASES_DIR, ReleaseFile
+from common.release import RELEASES_DIR, ReleaseExecution, ReleaseFile
 from common.round import RoundConfig
 from selection import describe_strategies, from_config
 
@@ -62,6 +62,25 @@ def cmd_check_release(args: argparse.Namespace) -> int:
             continue
         print(f"ok: {name} -> {release.model}/{release.version}")
     return 1 if failed else 0
+
+
+def cmd_release_input(args: argparse.Namespace) -> int:
+    """Print the model-release execution input for one release file (the
+    release workflow passes it to StartExecution)."""
+    try:
+        name, release = ReleaseFile.from_yaml(args.file)
+        ev = ReleaseExecution(
+            dataset=name,
+            model=release.model,
+            version=release.version,
+            released_by=args.released_by,
+            commit_sha=args.commit_sha,
+        )
+    except (OSError, ValidationError) as e:
+        print(e, file=sys.stderr)
+        return 1
+    print(ev.model_dump_json())
+    return 0
 
 
 def cmd_db_migrate(args: argparse.Namespace) -> int:
@@ -136,6 +155,12 @@ def main(argv: list[str] | None = None) -> int:
     check = sub.add_parser("check-round", help="validate a round config YAML")
     check.add_argument("config")
     sub.add_parser("check-release", help="validate configs/releases/*.yaml")
+    release_input = sub.add_parser(
+        "release-input", help="print the model-release input for a release file"
+    )
+    release_input.add_argument("file", help="configs/releases/<dataset>.yaml")
+    release_input.add_argument("--released-by", required=True, help="GitHub login of the merger")
+    release_input.add_argument("--commit-sha", required=True)
 
     db = sub.add_parser("db", help="database commands (needs DATABASE_URL)")
     db_sub = db.add_subparsers(dest="db_command", required=True)
@@ -159,6 +184,7 @@ def main(argv: list[str] | None = None) -> int:
         "strategies": cmd_strategies,
         "check-round": cmd_check_round,
         "check-release": cmd_check_release,
+        "release-input": cmd_release_input,
         "seed": cmd_seed,
     }
     return handlers[args.command](args)

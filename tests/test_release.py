@@ -264,3 +264,22 @@ def test_rerunning_an_old_release_commit_changes_nothing(db, durian):
     # The first release's workflow is re-run after the second one.
     assert release.record(db, _execution(1, "1" * 40), _export(1))["action"] is None
     assert [r[0] for r in _releases(db)] == [1, 2]
+
+
+# al release-input (the release workflow builds the execution input with it)
+
+
+def test_release_input_prints_the_execution_input(repo, capsys):
+    import json
+
+    (repo / "durian.yaml").write_text("model: durian-fastvit\nversion: 2\n")
+    args = ["release-input", "configs/releases/durian.yaml", "--released-by", "duytq5"]
+    assert main([*args, "--commit-sha", COMMIT]) == 0
+    out = json.loads(capsys.readouterr().out)
+    assert ReleaseExecution.model_validate(out) == _execution(2)
+
+
+def test_release_input_refuses_a_bad_file(repo, capsys):
+    (repo / "durian.yaml").write_text("model: durian-fastvit\nversion: 0\n")
+    args = ["release-input", "configs/releases/durian.yaml", "--released-by", "duytq5"]
+    assert main([*args, "--commit-sha", COMMIT]) == 1
