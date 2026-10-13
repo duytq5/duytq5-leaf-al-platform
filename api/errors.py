@@ -3,6 +3,7 @@
 Throttling 429s from API Gateway itself don't use this shape.
 """
 
+import psycopg
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
@@ -16,6 +17,7 @@ ERROR_CODES = {
     405: "invalid_request",
     409: "conflict",
     429: "quota_exceeded",
+    503: "unavailable",
 }
 
 
@@ -39,3 +41,8 @@ def install_error_handlers(app: FastAPI) -> None:
         first = exc.errors()[0] if exc.errors() else {}
         where = ".".join(str(p) for p in first.get("loc", ()))
         return error_response(400, f"{where}: {first.get('msg', 'invalid')}".strip(": "))
+
+    @app.exception_handler(psycopg.OperationalError)
+    async def database_down(request: Request, exc: psycopg.OperationalError) -> JSONResponse:
+        # Postgres runs on the EC2 host, which is stopped when nobody works.
+        return error_response(503, "The database is not reachable; try again later.")

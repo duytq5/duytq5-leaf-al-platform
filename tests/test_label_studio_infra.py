@@ -160,7 +160,7 @@ def test_webhook_route_has_no_jwt_but_everything_else_does(t):
     }
     assert routes["POST /v1/hooks/label-studio"]["AuthorizationType"] == "NONE"
     assert routes["ANY /v1/{proxy+}"]["AuthorizationType"] == "JWT"
-    assert set(routes) == {"POST /v1/hooks/label-studio", "ANY /v1/{proxy+}"}
+    # The full route list, with the app's public routes: tests/test_api_infra.py.
 
 
 def test_label_step_is_retried_while_label_studio_restarts(t):
