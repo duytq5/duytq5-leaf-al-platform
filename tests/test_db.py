@@ -355,9 +355,10 @@ def test_natural_keys_stay_unique(conn):
     model = _model(conn, _round(conn))
     capture = (
         "INSERT INTO captures (capture_id, dataset_id, sha256, user_sub,"
-        " model_version_id, top1_class_id, confidence, probs, captured_at)"
+        " model_version_id, top1_class_id, confidence, probs, captured_at,"
+        " content_type, size_bytes)"
         f" SELECT %s, id, %s, 'user-sub', %s, {CLASS_A}, 0.6,"
-        """ '{"a": 0.6, "b": 0.4}', now()"""
+        """ '{"a": 0.6, "b": 0.4}', now(), 'image/jpeg', 1000"""
         " FROM datasets WHERE name = 'toy'"
         " ON CONFLICT (capture_id) DO NOTHING"
     )

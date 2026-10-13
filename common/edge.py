@@ -10,14 +10,24 @@ response.
 """
 
 from enum import StrEnum
-from typing import Literal, Self
+from typing import Annotated, Literal, Self
 from uuid import UUID
 
-from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, HttpUrl, model_validator
+from pydantic import (
+    AwareDatetime,
+    BaseModel,
+    ConfigDict,
+    Field,
+    HttpUrl,
+    StringConstraints,
+    model_validator,
+)
 
 from common.types import ClassCode, CropCode, DatasetName, Probability, Sha256
 
 MAX_UPLOAD_BYTES = 10 * 1024 * 1024
+# A model version as "{model}/{version}", e.g. "leaf-disease/12" (MLflow name and version).
+ModelVersionRef = Annotated[str, StringConstraints(pattern=r"^[^/]+/[1-9][0-9]*$", max_length=200)]
 PROBS_SUM_TOLERANCE = 0.01
 
 
@@ -35,7 +45,7 @@ class Inference(_Strict):
     """The on-device prediction. The Edge API computes top1 and confidence
     from probs and checks the keys against the model version's classes."""
 
-    model_version: str  # e.g. "leaf-disease/12"
+    model_version: ModelVersionRef
     probs: dict[ClassCode, Probability] = Field(min_length=2)
 
     @model_validator(mode="after")

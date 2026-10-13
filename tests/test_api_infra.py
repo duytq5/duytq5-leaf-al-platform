@@ -83,14 +83,23 @@ def _api_policy(t: Template) -> list[dict]:
     ]
 
 
-def test_api_lambda_may_only_read_released_models(t):
-    statements = _api_policy(t)
-    assert len(statements) == 1
-    (read,) = statements
-    assert read["Effect"] == "Allow"
-    assert read["Action"] == "s3:GetObject"
-    resource = json.dumps(read["Resource"])
-    assert "ModelsBucket" in resource and "/edge/*" in resource
+def test_api_lambda_may_only_read_models_and_upload_to_incoming(t):
+    # Presigned links work only for what the signer may do.
+    statements = {s["Action"]: s for s in _api_policy(t)}
+    assert set(statements) == {"s3:GetObject", "s3:PutObject"}
+    read = json.dumps(statements["s3:GetObject"]["Resource"])
+    assert "ModelsBucket" in read and "/edge/*" in read
+    write = json.dumps(statements["s3:PutObject"]["Resource"])
+    assert "DataBucket" in write and "/incoming/*" in write
+
+
+def test_upload_limit_setting(t):
+    env = _api_fn(t)["Environment"]["Variables"]
+    assert env["DATA_BUCKET"]["Ref"].startswith("DataBucket")
+    assert env["UPLOAD_DAILY_LIMIT"] == "100"
+    app = cdk.App(context={"uploadDailyLimit": "20"})
+    fn = _api_fn(Template.from_stack(PlatformStack(app, "LeafAlPlatform")))
+    assert fn["Environment"]["Variables"]["UPLOAD_DAILY_LIMIT"] == "20"
 
 
 def test_routes_need_a_token_except_the_public_ones(t):
