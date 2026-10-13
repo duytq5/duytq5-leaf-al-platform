@@ -22,8 +22,8 @@ from uuid import UUID, uuid5
 
 from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, field_validator
 
-from common.config import TrainConfig
 from common.manifest import ClassList
+from common.round import TrainSection
 from common.types import WorkerImage
 
 
@@ -42,8 +42,10 @@ class _Strict(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
 
-class TrainSpec(_Strict):
-    config: TrainConfig
+class TrainSpec(TrainSection):
+    """The round config's train section (recipe, params, base_model) plus
+    what the snapshot step adds."""
+
     manifest_uri: str
     # Output layer order; the round's Lambda stores the same list in
     # model_versions.labels.

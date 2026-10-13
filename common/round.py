@@ -1,19 +1,30 @@
-"""Human-written settings for an AL round.
+"""Human-written settings for an AL round: configs/rounds/<name>.yaml.
 
-The owner explores the data, then picks the strategy, its parameters and k for
-each round in a YAML file passed to the round CLI. Nothing about selection is
-hardcoded in the pipeline. The chosen values are stored on the `rounds` row
-(strategy, strategy_cfg, k) so every round is reproducible.
+The owner explores the data, then picks the training recipe and the selection
+strategy, their parameters and k for each round. Merging the file to main
+starts the round (design doc, "Control through GitHub"). Nothing about
+training or selection is hardcoded in the pipeline; the chosen values are
+stored on the `rounds` row and model_versions.train_config, so every round
+is reproducible.
 """
 
 from pathlib import Path
-from typing import Any, Literal
+from typing import Annotated, Any
 from uuid import UUID
 
 import yaml
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, StringConstraints
 
 from common.types import DatasetName, WorkerImage
+
+# A registered MLflow model to fine-tune from: a version or an alias,
+# e.g. models:/rocole-fastvit/3 or models:/rocole-fastvit@champion.
+BaseModelUri = Annotated[
+    str,
+    StringConstraints(
+        pattern=r"^models:/[A-Za-z0-9][A-Za-z0-9._-]*(/[1-9][0-9]*|@[A-Za-z0-9_-]+)$"
+    ),
+]
 
 
 class _Strict(BaseModel):
@@ -27,10 +38,18 @@ class SelectionConfig(_Strict):
     seed: int = 42
 
 
+class TrainSection(_Strict):
+    recipe: str  # a name registered in recipes (`al recipes`)
+    params: dict[str, Any] = Field(default_factory=dict)  # validated by the recipe
+    # None: start from the recipe's own weights (ImageNet for timm_classifier).
+    base_model: BaseModelUri | None = None
+
+
 class RoundConfig(_Strict):
     dataset: DatasetName
-    mode: Literal["simulation", "production"] = "simulation"
-    train_config: str  # path to a TrainConfig YAML
+    # The dataset version to train on; None: the latest.
+    base_version: int | None = Field(default=None, ge=0)
+    train: TrainSection
     selection: SelectionConfig
 
     @classmethod
@@ -43,10 +62,10 @@ class RoundExecution(_Strict):
     """Input of one al-round execution, set by the start-round Lambda.
 
     Everything else (dataset, base version, strategy, k, seed) is on the
-    `rounds` row. `train` is the round config's training section; the snapshot
-    step validates it as the train job's config.
+    `rounds` row. `train` is the round config's training section, sent to the
+    worker in the train job and stored on model_versions.train_config.
     """
 
     round_id: UUID
     image: WorkerImage
-    train: dict[str, Any]
+    train: TrainSection

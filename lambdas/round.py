@@ -198,7 +198,9 @@ def snapshot(conn: psycopg.Connection, store: S3Store, run: RoundExecution) -> d
     )
 
     train = TrainSpec(
-        config=run.train, manifest_uri=store.uri(manifest), classes=_classes(conn, rnd.dataset_id)
+        **run.train.model_dump(),
+        manifest_uri=store.uri(manifest),
+        classes=_classes(conn, rnd.dataset_id),
     )
     strategy = get_strategy(rnd.strategy, seed=rnd.seed, params=rnd.strategy_cfg)
     # The score spec's model_uri comes from the train job's result; the state
@@ -326,7 +328,7 @@ def merge(
                 result.mlflow_version,
                 result.mlflow_run_id,
                 result.arch,
-                Jsonb(run.train),
+                Jsonb(run.train.model_dump(mode="json")),
                 Jsonb(_classes(conn, rnd.dataset_id)),
                 Jsonb(result.metrics),
             ),

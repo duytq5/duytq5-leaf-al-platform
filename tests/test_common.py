@@ -12,8 +12,8 @@ from common import (
     DeviceConfig,
     ExportJob,
     ModelManifest,
+    RoundConfig,
     ScoreJob,
-    TrainConfig,
     TrainJob,
     parse_job,
     s3keys,
@@ -23,21 +23,42 @@ ROOT = Path(__file__).resolve().parents[1]
 SHA = "a" * 64
 
 
-def _config_dict() -> dict:
-    return TrainConfig.from_yaml(ROOT / "configs/train/example.yaml").model_dump(mode="json")
+def _round_dict() -> dict:
+    return RoundConfig.from_yaml(ROOT / "configs/rounds/example.yaml").model_dump(mode="json")
 
 
-def test_example_config_loads():
-    cfg = TrainConfig.from_yaml(ROOT / "configs/train/example.yaml")
-    assert cfg.model.arch == "fastvit_t8"
-    assert cfg.train.lr == pytest.approx(3e-4)  # YAML gives "3e-4" as a string
-    assert cfg.base_model is None
+def test_example_round_config_has_an_inline_train_section():
+    cfg = RoundConfig.from_yaml(ROOT / "configs/rounds/example.yaml")
+    assert cfg.train.recipe == "timm_classifier"
+    assert cfg.train.base_model is None
+    assert cfg.base_version is None  # the dataset's latest version
 
 
-def test_config_rejects_unknown_keys():
-    bad = _config_dict() | {"optimizer": "sgd"}
+@pytest.mark.parametrize(
+    "mutate",
+    [
+        lambda c: c.update(mode="simulation"),  # production only (owner, 2026-10-12)
+        lambda c: c.update(train_config="configs/train/example.yaml"),
+        lambda c: c["train"].update(optimizer="sgd"),
+        lambda c: c["train"].update(base_model="s3://bucket/model.pt"),
+        lambda c: c["train"].update(base_model="models:/x/0"),
+        lambda c: c.update(base_version=-1),
+    ],
+)
+def test_round_config_rejects(mutate):
+    bad = _round_dict()
+    mutate(bad)
     with pytest.raises(ValidationError):
-        TrainConfig.model_validate(bad)
+        RoundConfig.model_validate(bad)
+
+
+@pytest.mark.parametrize(
+    "base_model", ["models:/rocole-fastvit/3", "models:/rocole-fastvit@champion"]
+)
+def test_base_model_names_a_registered_model(base_model):
+    cfg = _round_dict()
+    cfg["train"]["base_model"] = base_model
+    assert RoundConfig.model_validate(cfg).train.base_model == base_model
 
 
 IMAGE = "ghcr.io/duytq5/duytq5-leaf-al-platform-worker:" + "b" * 40
@@ -59,7 +80,9 @@ def _job(type_: str, spec: dict, **extra) -> dict:
 
 def _train() -> dict:
     spec = {
-        "config": _config_dict(),
+        "recipe": "timm_classifier",
+        "params": {"epochs": 2},
+        "base_model": None,
         "manifest_uri": "s3://al-data/manifests/durian/v7.parquet",
         "classes": CLASSES,
     }

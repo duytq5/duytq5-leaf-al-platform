@@ -253,9 +253,9 @@ def _v0(conn) -> int:
 def _round(conn, status: str = "pending", base: int | None = None) -> uuid.UUID:
     rid = uuid.uuid4()
     conn.execute(
-        "INSERT INTO rounds (id, dataset_id, base_version_id, mode, strategy, k, seed, status,"
+        "INSERT INTO rounds (id, dataset_id, base_version_id, strategy, k, seed, status,"
         " started_by, commit_sha)"
-        " SELECT %s, id, %s, 'simulation', 'random', 10, 42, %s, 'owner', %s FROM datasets"
+        " SELECT %s, id, %s, 'random', 10, 42, %s, 'owner', %s FROM datasets"
         " WHERE name = 'toy'",
         (rid, base or _v0(conn), status, COMMIT),
     )
@@ -593,3 +593,14 @@ def test_rejected_is_a_train_status_only(conn):
     _image(conn, "train", "rejected")
     with pytest.raises(psycopg.errors.CheckViolation):
         _image(conn, "test", "rejected", sha="1" * 64)
+
+
+def test_rounds_have_no_mode(conn):
+    """Production only (owner, 2026-10-12): migration 0003 drops rounds.mode."""
+    columns = {
+        r[0]
+        for r in conn.execute(
+            "SELECT column_name FROM information_schema.columns WHERE table_name = 'rounds'"
+        )
+    }
+    assert "mode" not in columns and {"strategy", "k", "commit_sha"} <= columns

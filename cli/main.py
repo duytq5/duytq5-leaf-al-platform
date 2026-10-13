@@ -6,10 +6,10 @@ from pathlib import Path
 
 from pydantic import ValidationError
 
-from common.config import TrainConfig
 from common.dataset import CropsConfig, DatasetConfig
 from common.release import RELEASES_DIR, ReleaseExecution, ReleaseFile
 from common.round import RoundConfig
+from recipes import describe_recipes, get_recipe
 from selection import describe_strategies, from_config
 
 
@@ -18,25 +18,35 @@ def cmd_strategies(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_recipes(args: argparse.Namespace) -> int:
+    print(json.dumps(describe_recipes(), indent=2))
+    return 0
+
+
 def cmd_check_round(args: argparse.Namespace) -> int:
-    """Validate a round config, its strategy params and its train config."""
+    """Validate a round config: its dataset, recipe params and strategy params
+    (run from the repo root; no AWS, no torch)."""
     try:
         cfg = RoundConfig.from_yaml(args.config)
+        recipe = get_recipe(cfg.train.recipe, cfg.train.params)
         strategy = from_config(cfg.selection)
-        train = TrainConfig.from_yaml(cfg.train_config)  # relative to the repo root
     except KeyError as e:
         print(e.args[0])
         return 1
     except (OSError, ValidationError) as e:
         print(e)
         return 1
-    if train.data.dataset != cfg.dataset:
-        print(f"train config dataset {train.data.dataset!r} != round dataset {cfg.dataset!r}")
+    dataset = Path("configs/datasets") / f"{cfg.dataset}.yaml"
+    if not dataset.is_file():
+        print(f"no dataset {cfg.dataset} ({dataset} does not exist)")
         return 1
+    version = "latest version" if cfg.base_version is None else f"v{cfg.base_version}"
     print(
-        f"ok: {cfg.mode} round on {cfg.dataset}, strategy={cfg.selection.strategy} "
-        f"params={strategy.params.model_dump()} k={cfg.selection.k} "
-        f"needs={sorted(strategy.requires) or 'nothing'}"
+        f"ok: round on {cfg.dataset} {version}"
+        f", recipe={recipe.name} params={recipe.params.model_dump()}"
+        f" base_model={cfg.train.base_model or 'none'}"
+        f", strategy={cfg.selection.strategy} params={strategy.params.model_dump()}"
+        f" k={cfg.selection.k} needs={sorted(strategy.requires) or 'nothing'}"
     )
     return 0
 
@@ -153,6 +163,7 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="al", description="Active-learning operator CLI")
     sub = parser.add_subparsers(dest="command", required=True)
     sub.add_parser("strategies", help="list strategies, required inputs and parameters")
+    sub.add_parser("recipes", help="list training recipes and their parameters")
     check = sub.add_parser("check-round", help="validate a round config YAML")
     check.add_argument("config")
     check_release = sub.add_parser("check-release", help="validate configs/releases/*.yaml")
@@ -186,6 +197,7 @@ def main(argv: list[str] | None = None) -> int:
         return {"migrate": cmd_db_migrate}[args.db_command](args)
     handlers = {
         "strategies": cmd_strategies,
+        "recipes": cmd_recipes,
         "check-round": cmd_check_round,
         "check-release": cmd_check_release,
         "release-input": cmd_release_input,

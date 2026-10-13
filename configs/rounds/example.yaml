@@ -1,11 +1,15 @@
-# One AL round, chosen by a human (see common/round.py).
-# List strategies and their parameters:  uv run al strategies
-# Check this file before starting a round: uv run al check-round configs/rounds/example.yaml
-dataset: durian  # must match data.dataset in the train config
-mode: simulation
-train_config: configs/train/example.yaml
+# One AL round, chosen by a human (see common/round.py). Merging a new file
+# here to main starts the round.
+# List recipes and strategies with their parameters:  uv run al recipes / uv run al strategies
+# Check this file (CI does too):  uv run al check-round configs/rounds/example.yaml
+dataset: rocole
+# base_version: 0  # dataset version to train on; default: the latest
+train:
+  recipe: timm_classifier
+  params: {epochs: 20}
+  # base_model: models:/rocole-fastvit@champion  # fine-tune from a registered model
 selection:
   strategy: random
-  params: {}
+  params: {}  # selection
   k: 50
   seed: 42

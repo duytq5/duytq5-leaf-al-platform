@@ -1,11 +1,10 @@
 """Shared payloads used by the worker, Lambdas, CLI and edge API.
 
 Every message that crosses a process boundary (SQS job, Edge API body, model
-manifest, training config) is defined here as a Pydantic model, so producers
+manifest, round config) is defined here as a Pydantic model, so producers
 and consumers validate against the same schema.
 """
 
-from common.config import TrainConfig
 from common.dataset import ClassConfig, CropConfig, CropsConfig, DatasetConfig, SplitConfig
 from common.edge import (
     CaptureRequest,
@@ -18,7 +17,7 @@ from common.edge import (
 )
 from common.jobs import ExportJob, JobMessage, JobType, ScoreJob, TrainJob, parse_job
 from common.manifest import ModelManifest
-from common.round import RoundConfig, SelectionConfig
+from common.round import RoundConfig, SelectionConfig, TrainSection
 from common.types import ImageSource, ImageStatus, Split
 
 __all__ = [
@@ -44,7 +43,7 @@ __all__ = [
     "SelectionConfig",
     "Split",
     "SplitConfig",
-    "TrainConfig",
     "TrainJob",
+    "TrainSection",
     "parse_job",
 ]
