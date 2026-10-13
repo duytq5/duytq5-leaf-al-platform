@@ -1,8 +1,13 @@
+import json
 import os
 import uuid
 from urllib.parse import urlsplit, urlunsplit
 
 import pytest
+
+# CDK template tests don't build Lambda bundles (that downloads wheels); the
+# bundle itself is tested in tests/test_api_infra.py.
+os.environ.setdefault("CDK_CONTEXT_JSON", json.dumps({"aws:cdk:bundling-stacks": []}))
 
 
 @pytest.fixture

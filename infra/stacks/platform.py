@@ -22,14 +22,19 @@ Deploy-time settings come from CDK context (`cdk deploy -c key=value`):
                       (default http://localhost:8080/auth/callback)
 """
 
+import shutil
+import subprocess
 from pathlib import Path
 
+import jsii
 from aws_cdk import (
     Acknowledgment,
     Annotations,
     Aws,
+    BundlingOptions,
     CfnOutput,
     Duration,
+    ILocalBundling,
     RemovalPolicy,
     SecretValue,
     Size,
@@ -37,6 +42,9 @@ from aws_cdk import (
     Tags,
     Validations,
 )
+from aws_cdk import aws_apigatewayv2 as apigw
+from aws_cdk import aws_apigatewayv2_authorizers as apigw_auth
+from aws_cdk import aws_apigatewayv2_integrations as apigw_int
 from aws_cdk import aws_budgets as budgets
 from aws_cdk import aws_cognito as cognito
 from aws_cdk import aws_ec2 as ec2
@@ -74,7 +82,13 @@ DOCKER_BUILDX_VERSION = "v0.17.1"
 REPO_URL = "https://github.com/duytq5/duytq5-leaf-al-platform.git"
 REPO_DIR = "/home/ec2-user/duytq5-leaf-al-platform"
 
-LAMBDAS_DIR = Path(__file__).resolve().parents[2] / "lambdas"
+REPO_ROOT = Path(__file__).resolve().parents[2]
+LAMBDAS_DIR = REPO_ROOT / "lambdas"
+API_DIR = REPO_ROOT / "api"
+API_RUNTIME = "3.12"
+# Per-client limits on the whole API (requests per second, burst).
+API_RATE_LIMIT = 10
+API_BURST_LIMIT = 20
 
 # Cognito groups (design doc, Authentication and authorization). Operator and
 # ML engineer are GitHub roles (CODEOWNERS), not Cognito groups.
@@ -139,6 +153,7 @@ class PlatformStack(Stack):
         self._ec2_host()
         self._budget(ctx("budgetEmail"), float(ctx("budgetUsd") or 20))
         self._auth(ctx)
+        self._api()
 
         CfnOutput(self, "DataBucketName", value=self.data_bucket.bucket_name)
         CfnOutput(self, "ModelsBucketName", value=self.models_bucket.bucket_name)
@@ -554,6 +569,62 @@ class PlatformStack(Stack):
             client.node.add_dependency(google)
         return client
 
+    def _api(self) -> None:
+        """HTTP API in front of one FastAPI Lambda.
+
+        Every route needs a Cognito access token from the `mobile` or
+        `admin-web` client: the JWT authorizer checks signature, issuer,
+        client id and expiry and answers 401 itself. The Lambda then checks
+        groups (`api.auth.require_groups`). Public routes (`/v1/crops`,
+        `/v1/devices/config`) will be added with no authorizer when built.
+        """
+        log_group = logs.LogGroup(
+            self,
+            "ApiLogs",
+            retention=logs.RetentionDays.ONE_MONTH,
+            removal_policy=RemovalPolicy.DESTROY,
+        )
+        fn = lambda_.Function(
+            self,
+            "ApiFn",
+            runtime=lambda_.Runtime.PYTHON_3_12,
+            architecture=lambda_.Architecture.X86_64,
+            handler="api.app.handler",
+            code=lambda_.Code.from_asset(
+                str(API_DIR),
+                exclude=["__pycache__", "*.pyc"],
+                bundling=BundlingOptions(
+                    image=lambda_.Runtime.PYTHON_3_12.bundling_image,
+                    local=UvBundler(API_DIR),
+                    command=[
+                        "bash",
+                        "-c",
+                        "pip install --no-cache-dir -r requirements.txt -t /asset-output"
+                        " && mkdir /asset-output/api && cp -r . /asset-output/api",
+                    ],
+                ),
+            ),
+            memory_size=512,
+            timeout=Duration.seconds(10),
+            log_group=log_group,
+        )
+        authorizer = apigw_auth.HttpUserPoolAuthorizer(
+            "CognitoAuthorizer",
+            self.user_pool,
+            user_pool_clients=[self.mobile_client, self.admin_web_client],
+        )
+        api = apigw.HttpApi(self, "Api", default_authorizer=authorizer)
+        api.add_routes(
+            path="/v1/{proxy+}",
+            methods=[apigw.HttpMethod.ANY],
+            integration=apigw_int.HttpLambdaIntegration("ApiIntegration", fn),
+        )
+        stage: apigw.CfnStage = api.default_stage.node.default_child
+        stage.default_route_settings = apigw.CfnStage.RouteSettingsProperty(
+            throttling_rate_limit=API_RATE_LIMIT, throttling_burst_limit=API_BURST_LIMIT
+        )
+        CfnOutput(self, "ApiUrl", value=api.api_endpoint)
+
     def _post_confirmation_fn(self) -> lambda_.Function:
         log_group = logs.LogGroup(
             self,
@@ -663,3 +734,37 @@ def _host_setup_commands(volume_id: str, region: str) -> list[str]:
         f"[ -d {REPO_DIR}/.git ] || sudo -u ec2-user git clone {REPO_URL} {REPO_DIR}",
         f"sudo -u ec2-user env AWS_REGION={region} {REPO_DIR}/deploy/ec2/bootstrap.sh",
     ]
+
+
+@jsii.implements(ILocalBundling)
+class UvBundler:
+    """Build a Python Lambda bundle without Docker: `uv` downloads Linux
+    x86_64 wheels for the Lambda's Python version into the asset, then the
+    source directory is copied in under its own package name. Falls back to
+    CDK's Docker bundling when `uv` is not installed."""
+
+    def __init__(self, source: Path) -> None:
+        self.source = source
+
+    def try_bundle(self, output_dir: str, options) -> bool:
+        uv = shutil.which("uv")
+        if uv is None:
+            return False
+        out = Path(output_dir)
+        subprocess.run(
+            [
+                uv, "pip", "install", "--quiet",
+                "--target", str(out),
+                "--python-platform", "x86_64-manylinux2014",
+                "--python-version", API_RUNTIME,
+                "--only-binary", ":all:",
+                "-r", str(self.source / "requirements.txt"),
+            ],
+            check=True,
+        )  # fmt: skip
+        shutil.copytree(
+            self.source,
+            out / self.source.name,
+            ignore=shutil.ignore_patterns("__pycache__", "*.pyc", "requirements.txt"),
+        )
+        return True
