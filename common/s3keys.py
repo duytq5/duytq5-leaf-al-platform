@@ -4,6 +4,7 @@ s3://al-data/
   incoming/{sha256}.jpg
   raw/{dataset}/{sha256}.jpg
   manifests/{dataset}/v{n}.parquet
+  scores/{round_id}/pool-manifest.parquet   (input of the score job)
   scores/{round_id}/pool.parquet
   selections/{round_id}.json
 s3://al-models/
@@ -24,6 +25,10 @@ def raw_key(dataset: str, sha256: str) -> str:
 
 def manifest_key(dataset: str, version: int) -> str:
     return f"manifests/{dataset}/v{version}.parquet"
+
+
+def pool_manifest_key(round_id: UUID | str) -> str:
+    return f"scores/{round_id}/pool-manifest.parquet"
 
 
 def scores_key(round_id: UUID | str) -> str:

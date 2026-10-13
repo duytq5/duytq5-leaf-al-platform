@@ -85,9 +85,11 @@ export CDK_DEFAULT_ACCOUNT=$(aws sts get-caller-identity --query Account --outpu
 | S3 models bucket (`al-models`) | Same, plus versioning (old versions expire after 90 days). Kept on `cdk destroy`. |
 | SQS job queue + dead-letter queue | 20 s long polling, 30 min visibility, 14-day retention, a job goes to the DLQ after 3 failed receives. |
 | IAM user for the GPU worker | SSM port forwarding to the host only (no shell), consume jobs, report Step Functions task results, read `raw/` and `manifests/`, write `scores/`, read/write `mlflow-artifacts/`. No access key: you create it (section 4). |
-| VPC + EC2 instance | One public subnet, no NAT gateway. Amazon Linux 2023, `t3.medium` (2 vCPU, 4 GB), IMDSv2, no SSH key: connect with Session Manager. Docker, compose and cron installed, then Postgres + MLflow started on first boot. |
+| VPC + EC2 instance | One public subnet for the host, no NAT gateway. Amazon Linux 2023, `t3.medium` (2 vCPU, 4 GB), IMDSv2, no SSH key: connect with Session Manager. Docker, compose and cron installed, then Postgres + MLflow started on first boot. |
 | EBS data volume (`/data`) | gp3 20 GB, encrypted, mounted at `/data` on first boot. Kept when the instance or the stack is deleted. |
-| Security group | No inbound rules. You and the worker reach MLflow (5000) and Postgres (5432) through SSM port forwarding (section 3). |
+| Security group | Only Postgres (5432) from the Lambdas' security group. You and the worker reach MLflow (5000) and Postgres (5432) through SSM port forwarding (section 3). |
+| Lambda subnet | Private subnet on a second address range (10.1.0.0/24), no internet route; S3 through a free gateway endpoint. |
+| `al-round` state machine + 6 Lambdas | One AL round: mark running, snapshot, train and score jobs on SQS, select, wait for labels, merge; on any error the round is marked failed and its queued images go back to the pool. ARN in SSM `/leaf-al/state-machines/al-round`. Lambda logs kept 30 days. |
 | SSM parameters | `/leaf-al/buckets/data`, `/leaf-al/buckets/models`, `/leaf-al/queues/jobs-url`. |
 | AWS Budget | Monthly cost budget, email at 80 % actual and 100 % forecast. Only created when `budgetEmail` is set. |
 | Cognito user pool | Sign-in for people (section 6). Groups `admins`, `labelers`, `uploaders`; self sign-up off; email sign-in; optional TOTP MFA; hosted login domain; public PKCE clients `mobile` and `admin-web`. Kept on `cdk destroy`. |
@@ -134,6 +136,17 @@ To replace the certificate later (or the old self-signed one from before the
 CA), run the same block, then `scripts/ec2.sh setup`: it restarts Postgres
 when the certificate changed. Clients then download `tls-ca` again.
 
+The round Lambdas have no internet access, so they cannot read SSM at run
+time. CloudFormation copies the password into their settings at deploy time
+from a Secrets Manager copy (about $0.40 a month). Create it once, before the
+first deploy that includes the `al-round` state machine:
+
+```bash
+aws secretsmanager create-secret --name leaf-al/postgres-password --secret-string "$(aws ssm get-parameter --name /leaf-al/postgres/password --with-decryption --query Parameter.Value --output text)"
+```
+
+If you ever change the password, update both copies and deploy again.
+
 The stack writes the bucket names and queue URL to SSM itself.
 
 ## 2. CDK stack
@@ -167,6 +180,9 @@ The deploy prints these outputs; you need them below:
 aws cloudformation describe-stacks --stack-name LeafAlPlatform \
   --query 'Stacks[0].Outputs' --output table
 ```
+
+`cdk deploy` packages the Lambda code on your machine with `uv` (Linux
+wheels, no Docker needed); it takes a minute the first time.
 
 Before deploying a change, read the `diff`. If it says the `Host` instance
 will be **replaced**, stop and ask first: the data volume has to be detached
@@ -422,5 +438,6 @@ Use `--group-name labelers` for labelers.
 
 ## 7. Later
 
-The API, the `al-round` state machine and its Lambdas are added to the same
-stack by later PRs; this file gets their steps as they land.
+The API, the worker's train and score jobs, Label Studio with its webhook
+(which resumes a round waiting for labels) and the GitHub start-round
+workflow are added by later PRs; this file gets their steps as they land.

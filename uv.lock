@@ -1663,6 +1663,7 @@ dependencies = [
     { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.12'" },
     { name = "numpy", version = "2.5.3", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12'" },
     { name = "psycopg", extra = ["binary"] },
+    { name = "pyarrow" },
     { name = "pydantic" },
     { name = "pyyaml" },
 ]
@@ -1698,6 +1699,7 @@ requires-dist = [
     { name = "mlflow", marker = "extra == 'worker'", specifier = ">=3.0" },
     { name = "numpy", specifier = ">=1.26" },
     { name = "psycopg", extras = ["binary"], specifier = ">=3.2" },
+    { name = "pyarrow", specifier = ">=17" },
     { name = "pydantic", specifier = ">=2.7" },
     { name = "pyyaml", specifier = ">=6.0" },
     { name = "timm", marker = "extra == 'worker'", specifier = ">=1.0" },

@@ -13,7 +13,7 @@ uploads images and downloads ONNX models.
 | `db/` | Postgres schema (`db/migrations/*.sql`), migration runner, dataset seed script |
 | `selection/` | Selection strategy registry (`@register("name")`) and the built-in strategies |
 | `worker/` | Local GPU worker: long-polls SQS, runs `train` / `score` / `export` jobs |
-| `lambdas/` | Lambda handlers (select, oracle; later edge API, validation, Label Studio webhook) |
+| `lambdas/` | Lambda handlers: the `al-round` steps (`round.py`); later edge API, validation, Label Studio webhook |
 | `infra/` | AWS CDK app (Python), one stack: `LeafAlPlatform` |
 | `deploy/ec2/` | Docker Compose for the single EC2 instance: Postgres + MLflow |
 | `cli/` | Operator CLI `al` |
@@ -120,7 +120,7 @@ confidence) and `al round start`.
 - Test-split images never enter the AL pool or Label Studio.
 - One class list per dataset (machine `code` + readable `display_name`); the order of the codes is the model's output order and is copied into the manifest.
 - Buckets are private, uploads land in `incoming/` first, secrets live in SSM Parameter Store and are never committed.
-- Cost: the EC2 instance is the only always-on resource; stop it when idle. Lambdas run outside a VPC (no NAT gateway).
+- Cost: the EC2 instance is the only always-on resource; stop it when idle. Lambdas that use Postgres run in a private subnet with no NAT gateway (S3 through a free gateway endpoint).
 
 ## Roadmap
 

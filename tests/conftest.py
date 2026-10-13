@@ -4,6 +4,10 @@ from urllib.parse import urlsplit, urlunsplit
 
 import pytest
 
+# Template tests check CloudFormation, not Lambda code assets: skip bundling
+# them (it downloads Linux wheels). cdk.App reads this variable.
+os.environ.setdefault("CDK_CONTEXT_JSON", '{"aws:cdk:bundling-stacks": []}')
+
 
 @pytest.fixture
 def pg_url():

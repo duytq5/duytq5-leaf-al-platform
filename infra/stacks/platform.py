@@ -3,12 +3,18 @@
 This stack holds the core infrastructure: S3 buckets (al-data, al-models), the
 SQS job queue + DLQ, the worker's IAM user, the EC2 host with its retained data
 volume, SSM parameters for non-secret settings, the Budget alert, and the
-Cognito user pool that signs people in. Later PRs add the API, the al-round
-state machine and its Lambdas here.
+Cognito user pool that signs people in, and the al-round state machine with
+its Lambdas (infra/stacks/al_round.py). Later PRs add the API here.
 
 The EC2 host has no inbound ports. The owner and the worker reach MLflow (5000)
 and Postgres (5432) through SSM Session Manager port forwarding, so access
 depends on IAM, not on an IP address.
+
+Lambdas that use Postgres run in a private subnet of the same VPC and reach
+the host on its private IP; the host's security group lets in 5432 from them
+only. They have no internet route (no NAT gateway): S3 is reached through a
+free gateway endpoint, and the Postgres password and CA are put into their
+settings by CloudFormation at deploy time.
 
 Deploy-time settings come from CDK context (`cdk deploy -c key=value`):
   budgetEmail   where the Budget alert goes; no Budget is created without it
@@ -48,6 +54,8 @@ from aws_cdk import aws_sqs as sqs
 from aws_cdk import aws_ssm as ssm
 from constructs import Construct
 
+from infra.stacks.al_round import AlRound
+
 # SSM Parameter Store layout. deploy/ec2/write-env.sh reads the same names.
 SSM_PREFIX = "/leaf-al"
 SSM_DATA_BUCKET = f"{SSM_PREFIX}/buckets/data"
@@ -55,6 +63,12 @@ SSM_MODELS_BUCKET = f"{SSM_PREFIX}/buckets/models"
 SSM_JOB_QUEUE_URL = f"{SSM_PREFIX}/queues/jobs-url"
 # SecureString: CloudFormation cannot create these, the owner does (docs/aws-setup.md).
 SSM_POSTGRES_PASSWORD = f"{SSM_PREFIX}/postgres/password"
+SSM_POSTGRES_TLS_CA = f"{SSM_PREFIX}/postgres/tls-ca"
+# Secrets Manager copy of the Postgres password for the Lambdas, created by the
+# owner (docs/aws-setup.md). CloudFormation resolves it at deploy time, so it is
+# never in the template; a Lambda without internet access could not fetch it.
+POSTGRES_PASSWORD_SECRET = "leaf-al/postgres-password"
+SSM_AL_ROUND_ARN = f"{SSM_PREFIX}/state-machines/al-round"
 
 MLFLOW_PORT = 5000
 POSTGRES_PORT = 5432
@@ -73,6 +87,9 @@ DOCKER_COMPOSE_VERSION = "v2.29.7"
 DOCKER_BUILDX_VERSION = "v0.17.1"
 REPO_URL = "https://github.com/duytq5/duytq5-leaf-al-platform.git"
 REPO_DIR = "/home/ec2-user/duytq5-leaf-al-platform"
+# The host's subnet already spans the VPC's 10.0.0.0/16, so the Lambdas' private
+# subnet sits on a second range; the host and its subnet stay as they are.
+LAMBDA_CIDR = "10.1.0.0/24"
 
 LAMBDAS_DIR = Path(__file__).resolve().parents[2] / "lambdas"
 
@@ -137,6 +154,8 @@ class PlatformStack(Stack):
         self._parameters()
         self.worker_user = self._worker_user()
         self._ec2_host()
+        self._lambda_network()
+        self._al_round()
         self._budget(ctx("budgetEmail"), float(ctx("budgetUsd") or 20))
         self._auth(ctx)
 
@@ -279,7 +298,7 @@ class PlatformStack(Stack):
         state on a separate EBS volume that is kept when the instance or the
         stack is deleted."""
         # Public subnet only, no NAT gateway: the VPC itself costs nothing.
-        vpc = ec2.Vpc(
+        self.vpc = vpc = ec2.Vpc(
             self,
             "Vpc",
             max_azs=1,
@@ -292,7 +311,7 @@ class PlatformStack(Stack):
         # No inbound rules at all, not even SSH. The owner and the worker use
         # SSM Session Manager (shell and port forwarding), which goes out from
         # the SSM agent, so the instance needs only outbound access.
-        sg = ec2.SecurityGroup(
+        self.host_sg = sg = ec2.SecurityGroup(
             self,
             "HostSg",
             vpc=vpc,
@@ -347,7 +366,7 @@ class PlatformStack(Stack):
         # the instance, because the instance's user data refers to the volume.
         subnet = vpc.public_subnets[0]
         user_data = ec2.UserData.for_linux()
-        instance = ec2.Instance(
+        self.host = instance = ec2.Instance(
             self,
             "Host",
             vpc=vpc,
@@ -404,6 +423,79 @@ class PlatformStack(Stack):
 
         CfnOutput(self, "InstanceId", value=instance.instance_id)
         CfnOutput(self, "DataVolumeId", value=volume.volume_id)
+
+    def _lambda_network(self) -> None:
+        """A private subnet for the Lambdas, with no internet route, and an S3
+        gateway endpoint (free)."""
+        vpc, public = self.vpc, self.vpc.public_subnets[0]
+        cidr = ec2.CfnVPCCidrBlock(self, "LambdaCidr", vpc_id=vpc.vpc_id, cidr_block=LAMBDA_CIDR)
+        subnet = ec2.CfnSubnet(
+            self,
+            "LambdaSubnet",
+            vpc_id=vpc.vpc_id,
+            cidr_block=LAMBDA_CIDR,
+            availability_zone=public.availability_zone,
+            map_public_ip_on_launch=False,
+        )
+        subnet.add_dependency(cidr)
+        Tags.of(subnet).add("Name", "leaf-al-lambdas")
+        route_table = ec2.CfnRouteTable(self, "LambdaRouteTable", vpc_id=vpc.vpc_id)
+        ec2.CfnSubnetRouteTableAssociation(
+            self,
+            "LambdaRouteTableAssociation",
+            subnet_id=subnet.ref,
+            route_table_id=route_table.ref,
+        )
+        ec2.CfnVPCEndpoint(
+            self,
+            "S3Endpoint",
+            vpc_id=vpc.vpc_id,
+            service_name=f"com.amazonaws.{self.region}.s3",
+            vpc_endpoint_type="Gateway",
+            route_table_ids=[route_table.ref],
+        )
+        self.lambda_subnet = ec2.Subnet.from_subnet_attributes(
+            self,
+            "LambdaSubnetRef",
+            subnet_id=subnet.ref,
+            availability_zone=public.availability_zone,
+            route_table_id=route_table.ref,
+        )
+        self.lambda_sg = ec2.SecurityGroup(
+            self,
+            "LambdaSg",
+            vpc=vpc,
+            description="leaf-al Lambdas: Postgres on the host, S3 through the gateway endpoint",
+            allow_all_outbound=True,
+        )
+        self.host_sg.add_ingress_rule(
+            self.lambda_sg, ec2.Port.tcp(POSTGRES_PORT), "Postgres from the Lambdas (TLS)"
+        )
+
+    def _al_round(self) -> None:
+        al_round = AlRound(
+            self,
+            "AlRound",
+            vpc=self.vpc,
+            subnet=self.lambda_subnet,
+            security_group=self.lambda_sg,
+            environment={
+                "PG_HOSTADDR": self.host.instance_private_ip,
+                "PG_PASSWORD": SecretValue.secrets_manager(
+                    POSTGRES_PASSWORD_SECRET
+                ).unsafe_unwrap(),
+                "PG_CA": ssm.StringParameter.value_for_string_parameter(self, SSM_POSTGRES_TLS_CA),
+            },
+            data_bucket=self.data_bucket,
+            job_queue=self.job_queue,
+        )
+        ssm.StringParameter(
+            self,
+            "AlRoundArnParam",
+            parameter_name=SSM_AL_ROUND_ARN,
+            string_value=al_round.state_machine.state_machine_arn,
+        )
+        CfnOutput(self, "AlRoundStateMachineArn", value=al_round.state_machine.state_machine_arn)
 
     def _worker_tunnel(self, instance: ec2.Instance) -> None:
         """Let the worker open SSM port-forwarding sessions to the host (MLflow,
