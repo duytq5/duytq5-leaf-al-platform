@@ -12,7 +12,7 @@ uploads images and downloads ONNX models.
 | `common/` | Shared Pydantic models: SQS job messages, Edge API bodies, model manifest, training config, S3 key layout |
 | `db/` | Postgres schema (`db/migrations/*.sql`), migration runner, dataset seed script |
 | `selection/` | Selection strategy registry (`@register("name")`) and the built-in strategies |
-| `worker/` | Local GPU worker: long-polls SQS, runs `train` / `score` / `export` jobs |
+| `worker/` | GPU worker: the agent long-polls SQS and runs each `train` / `score` / `export` job in its worker image (`worker/Dockerfile`) |
 | `api/` | Edge and Admin API: one FastAPI Lambda behind the HTTP API (`/v1/me`, public `/v1/crops` and `/v1/devices/config`, uploads through `/v1/captures`; read-only `/v1/rounds/...` for labelers and admins, `/v1/datasets/{name}/versions` for admins) |
 | `lambdas/` | Lambda handlers: the `al-round` steps (`round.py`), the label step and Label Studio webhook (`labeling.py`, `label_studio_hook.py`), upload validation (`upload.py`), the `model-release` steps (`release.py`) |
 | `infra/` | AWS CDK app (Python), one stack: `LeafAlPlatform` |
@@ -33,9 +33,10 @@ uv run pytest
 uv run ruff check . && uv run ruff format --check .
 ```
 
-Extras: `worker` (torch, timm, mlflow, boto3), `lambdas` (boto3), `infra` (aws-cdk-lib).
-On the RTX 5070 machine install torch from the CUDA 12.8 index:
-`uv pip install torch --index-url https://download.pytorch.org/whl/cu128`.
+Extras: `worker` (torch, timm, mlflow, onnx), `lambdas` (boto3), `infra` (aws-cdk-lib).
+`uv sync --extra worker` runs the train, score and export tests on the CPU.
+On the GPU machine the jobs run in the worker image (`worker/Dockerfile`);
+the agent itself needs no extra (docs/aws-setup.md, "Run the worker").
 
 No AWS credentials are needed to build, lint or test. CDK synth also runs
 offline: `source .venv/bin/activate && npx aws-cdk synth`.

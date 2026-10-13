@@ -24,7 +24,7 @@ from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, field_validator
 
 from common.manifest import ClassList
 from common.round import TrainSection
-from common.types import WorkerImage
+from common.types import DatasetName, WorkerImage
 
 
 def job_uuid(round_id: UUID, job_type: "JobType") -> UUID:
@@ -46,6 +46,7 @@ class TrainSpec(TrainSection):
     """The round config's train section (recipe, params, base_model) plus
     what the snapshot step adds."""
 
+    dataset: DatasetName  # names the registered model, with the recipe
     manifest_uri: str
     # Output layer order; the round's Lambda stores the same list in
     # model_versions.labels.

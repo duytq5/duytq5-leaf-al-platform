@@ -1,0 +1,11 @@
+.git
+.venv
+**/__pycache__
+**/.pytest_cache
+**/.ruff_cache
+cdk.out
+deploy
+docs
+tests
+configs
+node_modules

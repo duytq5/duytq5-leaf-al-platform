@@ -202,7 +202,14 @@ class DockerRunner:
 
 
 # Settings the container gets from the agent's environment.
-PASSED_ENV = ("AWS_PROFILE", "AWS_REGION", "AWS_DEFAULT_REGION", "MLFLOW_TRACKING_URI")
+PASSED_ENV = (
+    "AWS_PROFILE",
+    "AWS_REGION",
+    "AWS_DEFAULT_REGION",
+    "MLFLOW_TRACKING_URI",
+    "MODELS_BUCKET",  # optional; the job reads it from SSM otherwise
+    "WORKER_NUM_WORKERS",
+)
 
 
 def main() -> None:  # pragma: no cover - wiring only
