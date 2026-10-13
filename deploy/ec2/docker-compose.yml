@@ -1,5 +1,9 @@
-# Runs on the single EC2 instance: Postgres (metadata + MLflow backend) and MLflow.
-# Label Studio joins this file in Phase 2.
+# Runs on the single EC2 instance: Postgres (metadata, MLflow and Label Studio
+# databases), MLflow, and Label Studio behind Caddy (HTTPS) and oauth2-proxy
+# (Cognito sign-in, groups labelers / admins only).
+#
+#   internet :443 -> caddy -> oauth2-proxy :4180 -> label-studio :8080
+#   label step Lambdas (VPC) -> label-studio :8080 with the admin API token
 #
 # Secrets come from .env next to this file (gitignored). On EC2, write .env
 # from SSM Parameter Store before `docker compose up -d`; see docs/aws-setup.md.
@@ -72,3 +76,83 @@ services:
       - --no-serve-artifacts
     ports:
       - "5000:5000"
+
+  # Label Studio Community. The first start creates the admin account and its
+  # API token from .env (the label step Lambdas use that token); open sign-up
+  # is off, so labelers join through an invite link from the admin.
+  label-studio:
+    image: heartexlabs/label-studio:1.23.2
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    command: ["label-studio", "start", "--no-browser", "--enable-legacy-api-token"]
+    environment:
+      DJANGO_DB: default
+      POSTGRE_HOST: postgres
+      POSTGRE_PORT: "5432"
+      POSTGRE_NAME: labelstudio
+      POSTGRE_USER: ${POSTGRES_USER:-al}
+      POSTGRE_PASSWORD: ${POSTGRES_PASSWORD}
+      # pg_hba.conf rejects connections without TLS; libpq reads this.
+      PGSSLMODE: require
+      LABEL_STUDIO_HOST: https://${LS_DOMAIN:?set LS_DOMAIN in .env}
+      CSRF_TRUSTED_ORIGINS: https://${LS_DOMAIN}
+      LABEL_STUDIO_DISABLE_SIGNUP_WITHOUT_LINK: "true"
+      LABEL_STUDIO_USERNAME: ${LS_ADMIN_EMAIL:?set LS_ADMIN_EMAIL in .env}
+      LABEL_STUDIO_PASSWORD: ${LS_ADMIN_PASSWORD:?set LS_ADMIN_PASSWORD in .env}
+      LABEL_STUDIO_USER_TOKEN: ${LS_API_TOKEN:?set LS_API_TOKEN in .env}
+      LABEL_STUDIO_ENABLE_LEGACY_API_TOKEN: "true"
+      # The webhook Lambda answers within API Gateway's 30 s.
+      WEBHOOK_TIMEOUT: "30"
+      # S3 links of tasks are signed with the instance role (no keys here).
+      AWS_DEFAULT_REGION: ${AWS_REGION}
+    ports:
+      # Only the Lambdas' security group may reach 8080; people come through Caddy.
+      - "8080:8080"
+
+  oauth2-proxy:
+    image: quay.io/oauth2-proxy/oauth2-proxy:v7.15.5
+    restart: unless-stopped
+    depends_on:
+      - label-studio
+    # Who gets through: members of these Cognito groups, from any email domain.
+    # Flags, not environment, for lists: a list in an environment variable is
+    # split on spaces, not commas.
+    command:
+      - --allowed-group=labelers
+      - --allowed-group=admins
+      - --email-domain=*
+    environment:
+      OAUTH2_PROXY_PROVIDER: oidc
+      OAUTH2_PROXY_PROVIDER_DISPLAY_NAME: Cognito
+      OAUTH2_PROXY_OIDC_ISSUER_URL: ${OAUTH2_PROXY_OIDC_ISSUER_URL:?set it in .env}
+      OAUTH2_PROXY_CLIENT_ID: ${OAUTH2_PROXY_CLIENT_ID:?set it in .env}
+      OAUTH2_PROXY_CLIENT_SECRET: ${OAUTH2_PROXY_CLIENT_SECRET:?set it in .env}
+      OAUTH2_PROXY_COOKIE_SECRET: ${OAUTH2_PROXY_COOKIE_SECRET:?set it in .env}
+      OAUTH2_PROXY_REDIRECT_URL: https://${LS_DOMAIN}/oauth2/callback
+      OAUTH2_PROXY_SCOPE: openid email profile
+      OAUTH2_PROXY_CODE_CHALLENGE_METHOD: S256
+      OAUTH2_PROXY_OIDC_GROUPS_CLAIM: cognito:groups
+      OAUTH2_PROXY_UPSTREAMS: http://label-studio:8080
+      OAUTH2_PROXY_HTTP_ADDRESS: 0.0.0.0:4180
+      OAUTH2_PROXY_REVERSE_PROXY: "true"
+      OAUTH2_PROXY_COOKIE_SECURE: "true"
+      OAUTH2_PROXY_SKIP_PROVIDER_BUTTON: "true"
+      OAUTH2_PROXY_PASS_HOST_HEADER: "true"
+
+  # HTTPS with a Let's Encrypt certificate for LS_DOMAIN (renewed by Caddy).
+  caddy:
+    image: caddy:2.11.7-alpine
+    restart: unless-stopped
+    depends_on:
+      - oauth2-proxy
+    environment:
+      LS_DOMAIN: ${LS_DOMAIN}
+    volumes:
+      - ./caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+      # Certificates survive restarts, so Let's Encrypt limits are never hit.
+      - ${DATA_DIR}/caddy:/data
+    ports:
+      - "80:80"
+      - "443:443"

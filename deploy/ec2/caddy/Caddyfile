@@ -1,0 +1,7 @@
+# Label Studio's public entry. Caddy gets and renews the certificate for
+# LS_DOMAIN (port 80 answers the ACME challenge and redirects to HTTPS); every
+# request then goes through oauth2-proxy's Cognito sign-in.
+{$LS_DOMAIN} {
+	encode gzip
+	reverse_proxy oauth2-proxy:4180
+}

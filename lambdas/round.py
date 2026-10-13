@@ -5,8 +5,8 @@
                 train and score job specs
   (train, score: SQS jobs the worker runs; Step Functions waits for them)
   select        runs the round's strategy on the scores, marks k images queued
-  await_labels  stores the label task token; the Label Studio webhook resumes
-                the round once all k images are labeled (F2)
+  (await labels: lambdas/labeling.py puts the selected images into Label
+                Studio; its webhook resumes the round once all k are labeled, F2)
   merge         new dataset version, model_versions row, round succeeded
   fail          round failed, its queued images back to unlabeled
 
@@ -265,12 +265,6 @@ def select(conn: psycopg.Connection, store: Store, round_id: UUID) -> dict[str, 
     return {"selected": len(ids)}
 
 
-def await_labels(conn: psycopg.Connection, round_id: UUID, task_token: str) -> None:
-    """Store the token the Label Studio webhook resumes the round with."""
-    _running(conn, round_id)
-    conn.execute("UPDATE rounds SET label_task_token = %s WHERE id = %s", (task_token, round_id))
-
-
 def merge(
     conn: psycopg.Connection,
     store: Store,
@@ -381,10 +375,6 @@ class _Event(BaseModel):
     round_id: UUID
 
 
-class _TokenEvent(_Event):
-    task_token: str
-
-
 class _MergeEvent(RoundExecution):
     train_result: TrainResult
 
@@ -407,12 +397,6 @@ def snapshot_handler(event: dict, _context) -> dict:
 def select_handler(event: dict, _context) -> dict:
     with open_db() as conn:
         return select(conn, _store(), _Event.model_validate(event).round_id)
-
-
-def await_labels_handler(event: dict, _context) -> None:
-    ev = _TokenEvent.model_validate(event)
-    with open_db() as conn:
-        await_labels(conn, ev.round_id, ev.task_token)
 
 
 def merge_handler(event: dict, _context) -> dict:

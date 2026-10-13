@@ -3,12 +3,16 @@
 This stack holds the core infrastructure: S3 buckets (al-data, al-models), the
 SQS job queue + DLQ, the worker's IAM user, the EC2 host with its retained data
 volume, SSM parameters for non-secret settings, the Budget alert, and the
-Cognito user pool that signs people in, and the al-round state machine with
-its Lambdas (infra/stacks/al_round.py). Later PRs add the API here.
+Cognito user pool that signs people in, the al-round state machine with
+its Lambdas (infra/stacks/al_round.py), the HTTP API, and Label Studio's
+public entry and webhook.
 
-The EC2 host has no inbound ports. The owner and the worker reach MLflow (5000)
-and Postgres (5432) through SSM Session Manager port forwarding, so access
-depends on IAM, not on an IP address.
+The EC2 host has no inbound ports except HTTPS for Label Studio (80 and 443,
+Caddy, then the oauth2-proxy Cognito gate for `labelers` / `admins`). The
+owner and the worker reach MLflow (5000) and Postgres (5432) through SSM
+Session Manager port forwarding, so access depends on IAM, not on an IP
+address. The host keeps one Elastic IP across stop and start, so Label
+Studio's address (and the Cognito callback URL) never changes.
 
 Lambdas that use Postgres run in a private subnet of the same VPC and reach
 the host on its private IP; the host's security group lets in 5432 from them
@@ -26,6 +30,9 @@ Deploy-time settings come from CDK context (`cdk deploy -c key=value`):
   mobileCallbackUrls  comma-separated sign-in redirects of the app (default leafal://auth/callback)
   adminCallbackUrls   comma-separated sign-in redirects of admin tools
                       (default http://localhost:8080/auth/callback)
+  labelStudioDomain   Label Studio's host name (default <Elastic IP>.sslip.io,
+                      a free name that resolves to the IP, so Caddy can get a
+                      Let's Encrypt certificate without owning a domain)
 """
 
 from pathlib import Path
@@ -33,6 +40,7 @@ from pathlib import Path
 from aws_cdk import (
     Acknowledgment,
     Annotations,
+    ArnFormat,
     Aws,
     CfnOutput,
     Duration,
@@ -73,6 +81,16 @@ SSM_POSTGRES_TLS_CA = f"{SSM_PREFIX}/postgres/tls-ca"
 # never in the template; a Lambda without internet access could not fetch it.
 POSTGRES_PASSWORD_SECRET = "leaf-al/postgres-password"
 SSM_AL_ROUND_ARN = f"{SSM_PREFIX}/state-machines/al-round"
+# Label Studio settings write-env.sh reads on the host.
+SSM_USER_POOL_ID = f"{SSM_PREFIX}/auth/user-pool-id"
+SSM_LABEL_STUDIO_DOMAIN = f"{SSM_PREFIX}/label-studio/domain"
+SSM_LABEL_STUDIO_CLIENT_ID = f"{SSM_PREFIX}/label-studio/client-id"
+# Secrets Manager JSON created by the owner (docs/aws-setup.md): admin_email,
+# admin_password, api_token, webhook_secret, cookie_secret. The host reads it
+# at setup; CloudFormation puts api_token and webhook_secret into the Lambdas.
+LABEL_STUDIO_SECRET = "leaf-al/label-studio"
+LABEL_STUDIO_PORT = 8080
+WEBHOOK_PATH = "/v1/hooks/label-studio"
 
 MLFLOW_PORT = 5000
 POSTGRES_PORT = 5432
@@ -167,6 +185,7 @@ class PlatformStack(Stack):
         self._budget(ctx("budgetEmail"), float(ctx("budgetUsd") or 20))
         self._auth(ctx)
         self._api()
+        self._label_studio()
 
         CfnOutput(self, "DataBucketName", value=self.data_bucket.bucket_name)
         CfnOutput(self, "ModelsBucketName", value=self.models_bucket.bucket_name)
@@ -430,6 +449,23 @@ class PlatformStack(Stack):
         user_data.add_commands(*_host_setup_commands(volume.volume_id, self.region))
         self._worker_tunnel(instance)
 
+        # A fixed public address for Label Studio: the auto-assigned one
+        # changes on every stop and start.
+        eip = ec2.CfnEIP(self, "HostEip", domain="vpc")
+        Tags.of(eip).add("Name", "leaf-al-host")
+        ec2.CfnEIPAssociation(
+            self,
+            "HostEipAssociation",
+            allocation_id=eip.attr_allocation_id,
+            instance_id=instance.instance_id,
+        )
+        self.label_studio_domain = (
+            self.node.try_get_context("labelStudioDomain") or f"{eip.attr_public_ip}.sslip.io"
+        )
+        # Caddy: ACME HTTP challenge and redirect on 80, Label Studio on 443.
+        for port in (80, 443):
+            sg.add_ingress_rule(ec2.Peer.any_ipv4(), ec2.Port.tcp(port), "Label Studio (Caddy)")
+
         CfnOutput(self, "InstanceId", value=instance.instance_id)
         CfnOutput(self, "DataVolumeId", value=volume.volume_id)
 
@@ -480,6 +516,11 @@ class PlatformStack(Stack):
         self.host_sg.add_ingress_rule(
             self.lambda_sg, ec2.Port.tcp(POSTGRES_PORT), "Postgres from the Lambdas (TLS)"
         )
+        # The label step calls Label Studio's API directly, past the Cognito gate,
+        # with the admin API token; this port is closed to everyone else.
+        self.host_sg.add_ingress_rule(
+            self.lambda_sg, ec2.Port.tcp(LABEL_STUDIO_PORT), "Label Studio API from the Lambdas"
+        )
 
     def _al_round(self) -> None:
         al_round = AlRound(
@@ -495,9 +536,14 @@ class PlatformStack(Stack):
                 ).unsafe_unwrap(),
                 "PG_CA": ssm.StringParameter.value_for_string_parameter(self, SSM_POSTGRES_TLS_CA),
             },
+            label_studio_environment={
+                "LS_URL": f"http://{self.host.instance_private_ip}:{LABEL_STUDIO_PORT}",
+                "LS_API_TOKEN": self._label_studio_secret("api_token"),
+            },
             data_bucket=self.data_bucket,
             job_queue=self.job_queue,
         )
+        self.al_round = al_round
         ssm.StringParameter(
             self,
             "AlRoundArnParam",
@@ -612,6 +658,24 @@ class PlatformStack(Stack):
         self.admin_web_client = self._app_client(
             "AdminWebClient", "admin-web", urls("adminCallbackUrls", DEFAULT_ADMIN_CALLBACK), None
         )
+        # oauth2-proxy in front of Label Studio: a server, so it keeps a secret.
+        self.label_studio_client = self._app_client(
+            "LabelStudioClient",
+            "label-studio",
+            [f"https://{self.label_studio_domain}/oauth2/callback"],
+            None,
+            generate_secret=True,
+        )
+        for construct_id, name, value in [
+            ("UserPoolIdParam", SSM_USER_POOL_ID, self.user_pool.user_pool_id),
+            (
+                "LabelStudioClientIdParam",
+                SSM_LABEL_STUDIO_CLIENT_ID,
+                self.label_studio_client.user_pool_client_id,
+            ),
+            ("LabelStudioDomainParam", SSM_LABEL_STUDIO_DOMAIN, self.label_studio_domain),
+        ]:
+            ssm.StringParameter(self, construct_id, parameter_name=name, string_value=value)
 
         CfnOutput(self, "UserPoolId", value=self.user_pool.user_pool_id)
         CfnOutput(self, "MobileClientId", value=self.mobile_client.user_pool_client_id)
@@ -624,6 +688,8 @@ class PlatformStack(Stack):
         name: str,
         callback_urls: list[str],
         google: cognito.UserPoolIdentityProviderGoogle | None,
+        *,
+        generate_secret: bool = False,
     ) -> cognito.UserPoolClient:
         providers = [cognito.UserPoolClientIdentityProvider.COGNITO]
         if google:
@@ -631,7 +697,7 @@ class PlatformStack(Stack):
         client = self.user_pool.add_client(
             construct_id,
             user_pool_client_name=name,
-            generate_secret=False,
+            generate_secret=generate_secret,
             o_auth=cognito.OAuthSettings(
                 flows=cognito.OAuthFlows(authorization_code_grant=True),
                 scopes=[
@@ -686,7 +752,7 @@ class PlatformStack(Stack):
             self.user_pool,
             user_pool_clients=[self.mobile_client, self.admin_web_client],
         )
-        api = apigw.HttpApi(self, "Api", default_authorizer=authorizer)
+        self.http_api = api = apigw.HttpApi(self, "Api", default_authorizer=authorizer)
         api.add_routes(
             path="/v1/{proxy+}",
             methods=[apigw.HttpMethod.ANY],
@@ -697,6 +763,91 @@ class PlatformStack(Stack):
             throttling_rate_limit=API_RATE_LIMIT, throttling_burst_limit=API_BURST_LIMIT
         )
         CfnOutput(self, "ApiUrl", value=api.api_endpoint)
+
+    def _label_studio_secret(self, field: str) -> str:
+        """A field of the owner-made Label Studio secret, resolved by
+        CloudFormation at deploy time (the VPC Lambdas cannot fetch it)."""
+        return SecretValue.secrets_manager(LABEL_STUDIO_SECRET, json_field=field).unsafe_unwrap()
+
+    def _label_studio(self) -> None:
+        """What Label Studio on the host needs from AWS, and its webhook.
+
+        The webhook Lambda runs outside the VPC (it calls SendTaskSuccess; the
+        VPC has no NAT) and invokes RecordLabelFn inside the VPC for Postgres.
+        Its route has no JWT authorizer: Label Studio sends the shared secret.
+        """
+        webhook_secret = self._label_studio_secret("webhook_secret")
+        record_fn = self.al_round.record_label_fn
+        hook = lambda_.Function(
+            self,
+            "LabelStudioHookFn",
+            runtime=lambda_code.RUNTIME,
+            code=lambda_code.ROUND.code(),
+            handler="lambdas.label_studio_hook.handler",
+            timeout=Duration.seconds(30),
+            memory_size=256,
+            environment={
+                "RECORD_LABEL_FUNCTION": record_fn.function_name,
+                "LS_WEBHOOK_SECRET": webhook_secret,
+            },
+            log_group=logs.LogGroup(
+                self,
+                "LabelStudioHookLogs",
+                retention=logs.RetentionDays.ONE_MONTH,
+                removal_policy=RemovalPolicy.DESTROY,
+            ),
+        )
+        record_fn.grant_invoke(hook)
+        # SendTaskSuccess has no resource-level permissions; the token scopes it.
+        hook.add_to_role_policy(
+            iam.PolicyStatement(actions=["states:SendTaskSuccess"], resources=["*"])
+        )
+        self.http_api.add_routes(
+            path=WEBHOOK_PATH,
+            methods=[apigw.HttpMethod.POST],
+            integration=apigw_int.HttpLambdaIntegration("LabelStudioHookIntegration", hook),
+            authorizer=apigw.HttpNoneAuthorizer(),
+        )
+
+        start_fn = self.al_round.start_labeling_fn
+        start_fn.add_environment("LS_WEBHOOK_URL", f"{self.http_api.api_endpoint}{WEBHOOK_PATH}")
+        start_fn.add_environment("LS_WEBHOOK_SECRET", webhook_secret)
+
+        # write-env.sh reads the secret and the gate's client secret; Label
+        # Studio signs links to raw/ images with the instance role. A separate
+        # policy, so the instance itself does not depend on Cognito.
+        data = self.data_bucket
+        iam.Policy(
+            self,
+            "HostLabelStudioPolicy",
+            roles=[self.host.role],
+            statements=[
+                iam.PolicyStatement(
+                    actions=["secretsmanager:GetSecretValue"],
+                    resources=[
+                        self.format_arn(
+                            service="secretsmanager",
+                            resource="secret",
+                            resource_name=f"{LABEL_STUDIO_SECRET}-*",
+                            arn_format=ArnFormat.COLON_RESOURCE_NAME,
+                        )
+                    ],
+                ),
+                iam.PolicyStatement(
+                    actions=["cognito-idp:DescribeUserPoolClient"],
+                    resources=[self.user_pool.user_pool_arn],
+                ),
+                iam.PolicyStatement(
+                    actions=["s3:GetObject"], resources=[data.arn_for_objects("raw/*")]
+                ),
+                iam.PolicyStatement(
+                    actions=["s3:ListBucket"],
+                    resources=[data.bucket_arn],
+                    conditions={"StringLike": {"s3:prefix": ["raw/*"]}},
+                ),
+            ],
+        )
+        CfnOutput(self, "LabelStudioUrl", value=f"https://{self.label_studio_domain}")
 
     def _post_confirmation_fn(self) -> lambda_.Function:
         log_group = logs.LogGroup(

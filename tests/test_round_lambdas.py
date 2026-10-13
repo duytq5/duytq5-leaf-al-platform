@@ -66,13 +66,18 @@ class FakeStore:
         return f"s3://data/{key}"
 
 
-@pytest.fixture
-def env(pg_url, tmp_path):
+def seeded(pg_url, tmp_path):
+    """A migrated database with the toy dataset seeded, and the fake S3."""
     with connect(pg_url) as conn:
         migrate(conn)
         store = FakeStore()
         seed_dataset(conn, CFG, make_folder(tmp_path, {"a": 20, "b": 10}), store, CROPS)
         yield conn, store
+
+
+@pytest.fixture
+def env(pg_url, tmp_path):
+    yield from seeded(pg_url, tmp_path)
 
 
 def _round(conn, strategy: str = "random", k: int = 3) -> uuid.UUID:
@@ -176,10 +181,8 @@ def test_a_round_from_start_to_merge(env):
     assert steps.select(conn, store, rid) == {"selected": 3}  # a retry keeps the same set
     assert json.loads(store.objects[selection_key(rid)])["image_ids"] == chosen
 
-    steps.await_labels(conn, rid, "token-1")
-    assert conn.execute("SELECT label_task_token FROM rounds WHERE id = %s", (rid,)).fetchone() == (
-        "token-1",
-    )
+    # The label step (tests/test_labeling.py) stores the token the webhook resumes.
+    conn.execute("UPDATE rounds SET label_task_token = 'token-1' WHERE id = %s", (rid,))
 
     # The expert labels two images and marks the third "not a leaf".
     _label(conn, chosen[0], "a", rid)

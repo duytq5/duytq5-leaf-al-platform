@@ -165,22 +165,33 @@ def _security_groups(template: Template) -> dict[str, dict]:
     }
 
 
-def test_host_takes_only_postgres_from_the_lambdas(full):
+def test_host_takes_postgres_only_from_the_lambdas(full):
     groups = _security_groups(full)
     assert set(groups) == {"Host", "Lambda"}
-    assert all("SecurityGroupIngress" not in g["Properties"] for g in groups.values())
-    (rule,) = full.find_resources("AWS::EC2::SecurityGroupIngress").values()
-    props = rule["Properties"]
+    assert "SecurityGroupIngress" not in groups["Lambda"]["Properties"]
+    # From the internet only Label Studio's HTTPS entry (tests/test_label_studio_infra.py).
+    public = groups["Host"]["Properties"]["SecurityGroupIngress"]
+    assert sorted(r["FromPort"] for r in public) == [80, 443]
+    rules = [
+        r["Properties"] for r in full.find_resources("AWS::EC2::SecurityGroupIngress").values()
+    ]
+    (props,) = [r for r in rules if r["FromPort"] == 5432]
     assert (props["IpProtocol"], props["FromPort"], props["ToPort"]) == ("tcp", 5432, 5432)
     assert props["GroupId"]["Fn::GetAtt"][0].startswith("HostSg")
     assert props["SourceSecurityGroupId"]["Fn::GetAtt"][0].startswith("LambdaSg")
-    assert "CidrIp" not in props
+    assert all("CidrIp" not in r for r in rules)
 
 
 def test_old_cidr_context_is_ignored():
     template = _template(adminCidr="203.0.113.7/32", workerCidr="198.51.100.9/32")
+    (host,) = [
+        g for k, g in template.find_resources("AWS::EC2::SecurityGroup").items()
+        if k.startswith("HostSg")
+    ]  # fmt: skip
+    cidrs = {r["CidrIp"] for r in host["Properties"]["SecurityGroupIngress"]}
+    assert cidrs == {"0.0.0.0/0"}  # Label Studio's 80/443, not the old CIDRs
     rules = template.find_resources("AWS::EC2::SecurityGroupIngress").values()
-    assert ["CidrIp" in r["Properties"] for r in rules] == [False]
+    assert not any("CidrIp" in r["Properties"] for r in rules)
 
 
 def test_worker_can_only_port_forward_to_host(full):
@@ -232,7 +243,8 @@ def test_instance_no_ssh_imdsv2_ami_resolved_at_launch(full):
 
 def test_no_nat_gateway(full):
     full.resource_count_is("AWS::EC2::NatGateway", 0)
-    full.resource_count_is("AWS::EC2::EIP", 0)
+    # The one Elastic IP is the host's (Label Studio), not a NAT gateway's.
+    full.resource_count_is("AWS::EC2::EIP", 1)
     # The only route is the host subnet's internet route: Lambdas get none.
     (route,) = full.find_resources("AWS::EC2::Route").values()
     assert "LambdaRouteTable" not in json.dumps(route)
@@ -263,8 +275,12 @@ def _round_functions(template: Template) -> dict[str, dict]:
 def test_round_lambdas_run_in_the_lambda_subnet(full):
     functions = _round_functions(full)
     assert {p["Handler"] for p in functions.values()} == {
-        f"lambdas.round.{h}_handler"
-        for h in ("mark_running", "snapshot", "select", "await_labels", "merge", "fail")
+        *(
+            f"lambdas.round.{h}_handler"
+            for h in ("mark_running", "snapshot", "select", "merge", "fail")
+        ),
+        "lambdas.labeling.start_handler",
+        "lambdas.labeling.record_handler",
     }
     for props in functions.values():
         assert props["Runtime"] == "python3.12"
