@@ -15,9 +15,12 @@ from infra.stacks.platform import (
     PlatformStack,
 )
 
+# Tests check the template, not the Lambda code asset: skip bundling it.
+NO_BUNDLING = {"aws:cdk:bundling-stacks": []}
+
 
 def _template(**context) -> Template:
-    app = cdk.App(context=context)
+    app = cdk.App(context={**NO_BUNDLING, **context})
     return Template.from_stack(PlatformStack(app, "LeafAlPlatform"))
 
 
@@ -46,7 +49,7 @@ def _actions(stmt: dict) -> list[str]:
 
 
 def test_app_synthesizes():
-    assembly = build_app().synth()
+    assembly = build_app(NO_BUNDLING).synth()
     assert assembly.get_stack_by_name("LeafAlPlatform").template is not None
 
 
@@ -156,16 +159,28 @@ def test_no_access_key_in_template(full):
     full.resource_count_is("AWS::IAM::User", 1)
 
 
-def test_security_group_has_no_inbound(full):
-    (sg,) = full.find_resources("AWS::EC2::SecurityGroup").values()
-    assert "SecurityGroupIngress" not in sg["Properties"]
-    full.resource_count_is("AWS::EC2::SecurityGroupIngress", 0)
+def _security_groups(template: Template) -> dict[str, dict]:
+    return {
+        k.split("Sg")[0]: v for k, v in template.find_resources("AWS::EC2::SecurityGroup").items()
+    }
+
+
+def test_host_takes_only_postgres_from_the_lambdas(full):
+    groups = _security_groups(full)
+    assert set(groups) == {"Host", "Lambda"}
+    assert all("SecurityGroupIngress" not in g["Properties"] for g in groups.values())
+    (rule,) = full.find_resources("AWS::EC2::SecurityGroupIngress").values()
+    props = rule["Properties"]
+    assert (props["IpProtocol"], props["FromPort"], props["ToPort"]) == ("tcp", 5432, 5432)
+    assert props["GroupId"]["Fn::GetAtt"][0].startswith("HostSg")
+    assert props["SourceSecurityGroupId"]["Fn::GetAtt"][0].startswith("LambdaSg")
+    assert "CidrIp" not in props
 
 
 def test_old_cidr_context_is_ignored():
     template = _template(adminCidr="203.0.113.7/32", workerCidr="198.51.100.9/32")
-    (sg,) = template.find_resources("AWS::EC2::SecurityGroup").values()
-    assert "SecurityGroupIngress" not in sg["Properties"]
+    rules = template.find_resources("AWS::EC2::SecurityGroupIngress").values()
+    assert ["CidrIp" in r["Properties"] for r in rules] == [False]
 
 
 def test_worker_can_only_port_forward_to_host(full):
@@ -217,6 +232,99 @@ def test_instance_no_ssh_imdsv2_ami_resolved_at_launch(full):
 
 def test_no_nat_gateway(full):
     full.resource_count_is("AWS::EC2::NatGateway", 0)
+    full.resource_count_is("AWS::EC2::EIP", 0)
+    # The only route is the host subnet's internet route: Lambdas get none.
+    (route,) = full.find_resources("AWS::EC2::Route").values()
+    assert "LambdaRouteTable" not in json.dumps(route)
+
+
+def test_lambda_subnet_leaves_the_host_subnet_alone(full):
+    subnets = full.find_resources("AWS::EC2::Subnet")
+    # The host's subnet keeps its logical id and range, so it is not replaced.
+    assert subnets["VpcpublicSubnet1Subnet2BB74ED7"]["Properties"]["CidrBlock"] == "10.0.0.0/16"
+    lambdas = subnets["LambdaSubnet"]["Properties"]
+    assert lambdas["CidrBlock"] == "10.1.0.0/24"
+    assert lambdas["MapPublicIpOnLaunch"] is False
+    assert "Host" + "B4E45AD7" in full.find_resources("AWS::EC2::Instance")
+    full.has_resource_properties(
+        "AWS::EC2::VPCEndpoint",
+        {"VpcEndpointType": "Gateway", "RouteTableIds": [{"Ref": "LambdaRouteTable"}]},
+    )
+
+
+def _round_functions(template: Template) -> dict[str, dict]:
+    return {
+        k: v["Properties"]
+        for k, v in template.find_resources("AWS::Lambda::Function").items()
+        if k.startswith("AlRound")
+    }
+
+
+def test_round_lambdas_run_in_the_lambda_subnet(full):
+    functions = _round_functions(full)
+    assert {p["Handler"] for p in functions.values()} == {
+        f"lambdas.round.{h}_handler"
+        for h in ("mark_running", "snapshot", "select", "await_labels", "merge", "fail")
+    }
+    for props in functions.values():
+        assert props["Runtime"] == "python3.12"
+        assert props["VpcConfig"]["SubnetIds"] == [{"Ref": "LambdaSubnet"}]
+        env = props["Environment"]["Variables"]
+        assert env["PG_HOSTADDR"] == {"Fn::GetAtt": ["HostB4E45AD7", "PrivateIp"]}
+        # Resolved by CloudFormation at deploy time: never in the template.
+        assert "{{resolve:secretsmanager:leaf-al/postgres-password" in json.dumps(
+            env["PG_PASSWORD"]
+        )
+        assert env["PG_CA"]["Ref"].startswith("SsmParameterValueleafalpostgrestlsca")
+        assert "DATABASE_URL" not in env
+
+
+def _definition(template: Template) -> dict:
+    (machine,) = template.find_resources("AWS::StepFunctions::StateMachine").values()
+    assert machine["Properties"]["StateMachineName"] == "al-round"
+    parts = machine["Properties"]["DefinitionString"]["Fn::Join"][1]
+    return json.loads("".join(p if isinstance(p, str) else "ref" for p in parts))
+
+
+def test_round_state_machine_runs_the_f4_steps_in_order(full):
+    states = _definition(full)["States"]
+    order, name = [], _definition(full)["StartAt"]
+    while name in states and states[name].get("Next"):
+        order.append(name)
+        name = states[name]["Next"]
+    order.append(name)
+    assert order == [
+        "MarkRunning", "Snapshot", "Train", "Score", "Select", "AwaitLabels", "Merge",
+        "RoundSucceeded",
+    ]  # fmt: skip
+    for step in order[:-1]:
+        assert states[step]["Catch"][0]["Next"] == "MarkFailed"
+    assert states["MarkFailed"]["Next"] == "RoundFailed"
+    assert states["RoundFailed"]["Type"] == "Fail"
+
+
+def test_round_waits_for_the_worker_and_the_labels(full):
+    states = _definition(full)["States"]
+    for job in ("Train", "Score"):
+        assert states[job]["Resource"].endswith(":states:::sqs:sendMessage.waitForTaskToken")
+        body = states[job]["Parameters"]["MessageBody"]
+        assert body["task_token.$"] == "$$.Task.Token"
+        assert body["type"] == job.lower()
+        # The machine may be off for days: no heartbeat timeout, SQS retention instead.
+        assert "HeartbeatSeconds" not in states[job]
+        assert states[job]["TimeoutSeconds"] == 14 * 24 * 3600
+    assert states["Score"]["Parameters"]["MessageBody"]["spec"]["model_uri.$"] == (
+        "$.train_result.model_uri"
+    )
+    labels = states["AwaitLabels"]
+    assert labels["Resource"].endswith(":states:::lambda:invoke.waitForTaskToken")
+    assert labels["Parameters"]["Payload"]["task_token.$"] == "$$.Task.Token"
+
+
+def test_state_machine_arn_is_in_ssm(full):
+    full.has_resource_properties(
+        "AWS::SSM::Parameter", {"Name": "/leaf-al/state-machines/al-round"}
+    )
 
 
 def test_budget_only_with_email(full, bare):
@@ -234,3 +342,11 @@ def test_context_overrides():
     t.has_resource_properties(
         "AWS::Budgets::Budget", {"Budget": {"BudgetLimit": {"Amount": 35, "Unit": "USD"}}}
     )
+
+
+def test_lambda_libraries_are_pinned_to_the_lock_file():
+    from infra.lambda_code import ROUND
+
+    reqs = ROUND.requirements()
+    assert {r.split("==")[0] for r in reqs} >= {"psycopg-binary", "pyarrow", "pydantic"}
+    assert all("==" in r for r in reqs)

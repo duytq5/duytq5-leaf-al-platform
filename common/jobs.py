@@ -9,17 +9,27 @@ worker image built for the commit that started the round or release; the
 worker runs the job in it.
 
 SQS can deliver a message twice, so job handlers must be idempotent on job_id.
+
+Parquet files exchanged with the worker (written with pyarrow):
+  manifests/{dataset}/v{n}.parquet         image_id, sha256, key, split, class_code
+  scores/{round_id}/pool-manifest.parquet  image_id, sha256, key
+  scores/{round_id}/pool.parquet           image_id, probs (list<float>, class order)
 """
 
 from enum import StrEnum
 from typing import Annotated, Literal
-from uuid import UUID
+from uuid import UUID, uuid5
 
 from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, field_validator
 
 from common.config import TrainConfig
 from common.manifest import ClassList
 from common.types import WorkerImage
+
+
+def job_uuid(round_id: UUID, job_type: "JobType") -> UUID:
+    """The job id of a round's train or score job: the same on every retry."""
+    return uuid5(round_id, str(job_type))
 
 
 class JobType(StrEnum):
@@ -84,6 +94,23 @@ class ExportJob(_JobBase):
     type: Literal[JobType.EXPORT] = JobType.EXPORT
     round_id: None = None
     spec: ExportSpec
+
+
+class TrainResult(_Strict):
+    """What the worker returns with SendTaskSuccess for a train job. The round's
+    merge step stores it in model_versions."""
+
+    mlflow_name: str
+    mlflow_version: int = Field(ge=1)
+    mlflow_run_id: str
+    model_uri: str  # what the score and export jobs load, e.g. models:/name/3
+    arch: str
+    metrics: dict[str, float] = Field(default_factory=dict)
+
+
+class ScoreResult(_Strict):
+    output_uri: str
+    n_images: int = Field(ge=0)
 
 
 JobMessage = Annotated[TrainJob | ScoreJob | ExportJob, Field(discriminator="type")]

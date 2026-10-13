@@ -8,11 +8,12 @@ hardcoded in the pipeline. The chosen values are stored on the `rounds` row
 
 from pathlib import Path
 from typing import Any, Literal
+from uuid import UUID
 
 import yaml
 from pydantic import BaseModel, ConfigDict, Field
 
-from common.types import DatasetName
+from common.types import DatasetName, WorkerImage
 
 
 class _Strict(BaseModel):
@@ -36,3 +37,16 @@ class RoundConfig(_Strict):
     def from_yaml(cls, path: str | Path) -> "RoundConfig":
         with open(path, encoding="utf-8") as f:
             return cls.model_validate(yaml.safe_load(f))
+
+
+class RoundExecution(_Strict):
+    """Input of one al-round execution, set by the start-round Lambda.
+
+    Everything else (dataset, base version, strategy, k, seed) is on the
+    `rounds` row. `train` is the round config's training section; the snapshot
+    step validates it as the train job's config.
+    """
+
+    round_id: UUID
+    image: WorkerImage
+    train: dict[str, Any]

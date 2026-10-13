@@ -10,7 +10,8 @@ pytest.importorskip("aws_cdk")
 import aws_cdk as cdk
 from aws_cdk.assertions import Template
 
-from infra.stacks.platform import API_DIR, PlatformStack, UvBundler
+from infra.lambda_code import API, ROUND
+from infra.stacks.platform import PlatformStack
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -76,26 +77,25 @@ def test_api_output(t):
     assert "ApiUrl" in t.to_json()["Outputs"]
 
 
-def test_bundle_pins_match_lock():
+def test_bundles_are_pinned_to_the_lock_file():
     lock = {
         p["name"]: p["version"] for p in tomllib.loads((ROOT / "uv.lock").read_text())["package"]
     }
-    pins = [
-        line.split("==")
-        for line in (API_DIR / "requirements.txt").read_text().splitlines()
-        if line and not line.startswith("#")
-    ]
-    assert {name for name, _ in pins} == {"fastapi", "mangum"}
-    for name, version in pins:
-        assert lock[name] == version, f"{name}: requirements.txt {version}, uv.lock {lock[name]}"
+    for bundle in (API, ROUND):
+        for name, version in (r.split("==") for r in bundle.requirements()):
+            assert lock[name] == version
+    # The API bundle stays small: no Parquet or numpy.
+    assert {r.split("==")[0] for r in API.requirements()} >= {"fastapi", "mangum"}
+    assert not {"numpy", "pyarrow"} & set(API.libraries)
 
 
 @pytest.mark.skipif(shutil.which("uv") is None, reason="uv not installed")
 def test_local_bundle_has_linux_wheels_and_code(tmp_path):
     # Downloads wheels (needs network): the same step `cdk deploy` runs.
-    assert UvBundler(API_DIR).try_bundle(str(tmp_path), None) is True
+    API.build(tmp_path, shutil.which("uv"))
     assert (tmp_path / "api" / "app.py").is_file()
     assert (tmp_path / "fastapi").is_dir() and (tmp_path / "mangum").is_dir()
     assert not list((tmp_path / "api").rglob("__pycache__"))
+    assert not (tmp_path / "numpy").exists()
     (core,) = list(tmp_path.glob("pydantic_core/_pydantic_core*.so"))
     assert "x86_64-linux-gnu" in core.name and "cpython-312" in core.name

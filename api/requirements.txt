@@ -1,3 +1,0 @@
-# Pinned for the API Lambda bundle; tests/test_api_infra.py checks these match uv.lock.
-fastapi==0.142.2
-mangum==0.22.0
