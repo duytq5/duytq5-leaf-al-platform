@@ -2,8 +2,9 @@
 
 This stack holds the core infrastructure: S3 buckets (al-data, al-models), the
 SQS job queue + DLQ, the worker's IAM user, the EC2 host with its retained data
-volume, SSM parameters for non-secret settings, and the Budget alert. Later
-Phase 1 PRs add the al-round state machine, Lambdas and Cognito here.
+volume, SSM parameters for non-secret settings, the Budget alert, and the
+Cognito user pool that signs people in. Later PRs add the API, the al-round
+state machine and its Lambdas here.
 
 The EC2 host has no inbound ports. The owner and the worker reach MLflow (5000)
 and Postgres (5432) through SSM Session Manager port forwarding, so access
@@ -14,22 +15,34 @@ Deploy-time settings come from CDK context (`cdk deploy -c key=value`):
   budgetUsd     monthly budget in USD (default 20)
   instanceType  EC2 instance type (default t3.medium)
   dataVolumeGb  size of the /data EBS volume (default 20)
+  authDomainPrefix    prefix of the Cognito login domain (default leaf-al-<account id>)
+  googleClientId      Google OAuth client id; no Google sign-in without it
+  mobileCallbackUrls  comma-separated sign-in redirects of the app (default leafal://auth/callback)
+  adminCallbackUrls   comma-separated sign-in redirects of admin tools
+                      (default http://localhost:8080/auth/callback)
 """
+
+from pathlib import Path
 
 from aws_cdk import (
     Acknowledgment,
     Annotations,
+    Aws,
     CfnOutput,
     Duration,
     RemovalPolicy,
+    SecretValue,
     Size,
     Stack,
     Tags,
     Validations,
 )
 from aws_cdk import aws_budgets as budgets
+from aws_cdk import aws_cognito as cognito
 from aws_cdk import aws_ec2 as ec2
 from aws_cdk import aws_iam as iam
+from aws_cdk import aws_lambda as lambda_
+from aws_cdk import aws_logs as logs
 from aws_cdk import aws_s3 as s3
 from aws_cdk import aws_sqs as sqs
 from aws_cdk import aws_ssm as ssm
@@ -60,6 +73,23 @@ DOCKER_COMPOSE_VERSION = "v2.29.7"
 DOCKER_BUILDX_VERSION = "v0.17.1"
 REPO_URL = "https://github.com/duytq5/duytq5-leaf-al-platform.git"
 REPO_DIR = "/home/ec2-user/duytq5-leaf-al-platform"
+
+LAMBDAS_DIR = Path(__file__).resolve().parents[2] / "lambdas"
+
+# Cognito groups (design doc, Authentication and authorization). Operator and
+# ML engineer are GitHub roles (CODEOWNERS), not Cognito groups.
+AUTH_GROUPS = ("admins", "labelers", "uploaders")
+AUTH_GROUP_DESCRIPTIONS = {
+    "admins": "Read-only Admin API, Label Studio gate; created by the owner",
+    "labelers": "Active rounds, Label Studio gate; created by the owner",
+    "uploaders": "Send images from the app; added on first Google sign-in",
+}
+# Secrets Manager secret holding the Google OAuth client secret. Created by the
+# owner (docs/aws-setup.md); CloudFormation resolves it at deploy time, so it is
+# never in the template.
+GOOGLE_CLIENT_SECRET_NAME = "leaf-al/google-client-secret"
+DEFAULT_MOBILE_CALLBACK = "leafal://auth/callback"
+DEFAULT_ADMIN_CALLBACK = "http://localhost:8080/auth/callback"
 
 
 class PlatformStack(Stack):
@@ -108,6 +138,7 @@ class PlatformStack(Stack):
         self.worker_user = self._worker_user()
         self._ec2_host()
         self._budget(ctx("budgetEmail"), float(ctx("budgetUsd") or 20))
+        self._auth(ctx)
 
         CfnOutput(self, "DataBucketName", value=self.data_bucket.bucket_name)
         CfnOutput(self, "ModelsBucketName", value=self.models_bucket.bucket_name)
@@ -407,6 +438,152 @@ class PlatformStack(Stack):
                 ],
             )
         )
+
+    def _auth(self, ctx) -> None:
+        """Cognito user pool for people (machines keep IAM).
+
+        The owner creates admins and labelers; only Google sign-ins from the app
+        register themselves, and the post-confirmation trigger puts those in
+        `uploaders`. Sign-in goes through the hosted login page with
+        authorization code + PKCE, so both app clients are public (no secret)
+        and no password API is enabled.
+        """
+        trigger = self._post_confirmation_fn()
+        self.user_pool = cognito.UserPool(
+            self,
+            "UserPool",
+            feature_plan=cognito.FeaturePlan.LITE,
+            self_sign_up_enabled=False,
+            sign_in_aliases=cognito.SignInAliases(email=True),
+            auto_verify=cognito.AutoVerifiedAttrs(email=True),
+            standard_attributes=cognito.StandardAttributes(
+                email=cognito.StandardAttribute(required=True, mutable=True)
+            ),
+            password_policy=cognito.PasswordPolicy(min_length=12),
+            mfa=cognito.Mfa.OPTIONAL,
+            mfa_second_factor=cognito.MfaSecondFactor(sms=False, otp=True),
+            account_recovery=cognito.AccountRecovery.EMAIL_ONLY,
+            lambda_triggers=cognito.UserPoolTriggers(post_confirmation=trigger),
+            removal_policy=RemovalPolicy.RETAIN,
+        )
+        for name in AUTH_GROUPS:
+            cognito.UserPoolGroup(
+                self,
+                f"Group{name.capitalize()}",
+                user_pool=self.user_pool,
+                group_name=name,
+                description=AUTH_GROUP_DESCRIPTIONS[name],
+            )
+
+        domain = self.user_pool.add_domain(
+            "LoginDomain",
+            cognito_domain=cognito.CognitoDomainOptions(
+                domain_prefix=ctx("authDomainPrefix") or f"leaf-al-{Aws.ACCOUNT_ID}"
+            ),
+        )
+
+        google = None
+        google_client_id = ctx("googleClientId")
+        if google_client_id:
+            google = cognito.UserPoolIdentityProviderGoogle(
+                self,
+                "UserPoolGoogle",
+                user_pool=self.user_pool,
+                client_id=google_client_id,
+                client_secret_value=SecretValue.secrets_manager(GOOGLE_CLIENT_SECRET_NAME),
+                scopes=["openid", "email", "profile"],
+                attribute_mapping=cognito.AttributeMapping(
+                    email=cognito.ProviderAttribute.GOOGLE_EMAIL
+                ),
+            )
+        else:
+            Annotations.of(self).add_warning_v2(
+                "leaf-al:no-google-client-id",
+                "googleClientId is not set: the app has no Google sign-in yet (docs/aws-setup.md).",
+            )
+
+        def urls(key: str, default: str) -> list[str]:
+            return [u.strip() for u in (ctx(key) or default).split(",") if u.strip()]
+
+        self.mobile_client = self._app_client(
+            "MobileClient", "mobile", urls("mobileCallbackUrls", DEFAULT_MOBILE_CALLBACK), google
+        )
+        self.admin_web_client = self._app_client(
+            "AdminWebClient", "admin-web", urls("adminCallbackUrls", DEFAULT_ADMIN_CALLBACK), None
+        )
+
+        CfnOutput(self, "UserPoolId", value=self.user_pool.user_pool_id)
+        CfnOutput(self, "MobileClientId", value=self.mobile_client.user_pool_client_id)
+        CfnOutput(self, "AdminWebClientId", value=self.admin_web_client.user_pool_client_id)
+        CfnOutput(self, "AuthDomainUrl", value=domain.base_url())
+
+    def _app_client(
+        self,
+        construct_id: str,
+        name: str,
+        callback_urls: list[str],
+        google: cognito.UserPoolIdentityProviderGoogle | None,
+    ) -> cognito.UserPoolClient:
+        providers = [cognito.UserPoolClientIdentityProvider.COGNITO]
+        if google:
+            providers.append(cognito.UserPoolClientIdentityProvider.GOOGLE)
+        client = self.user_pool.add_client(
+            construct_id,
+            user_pool_client_name=name,
+            generate_secret=False,
+            o_auth=cognito.OAuthSettings(
+                flows=cognito.OAuthFlows(authorization_code_grant=True),
+                scopes=[
+                    cognito.OAuthScope.OPENID,
+                    cognito.OAuthScope.EMAIL,
+                    cognito.OAuthScope.PROFILE,
+                ],
+                callback_urls=callback_urls,
+            ),
+            supported_identity_providers=providers,
+            prevent_user_existence_errors=True,
+            access_token_validity=Duration.hours(1),
+            id_token_validity=Duration.hours(1),
+            refresh_token_validity=Duration.days(30),
+        )
+        # Left out, Cognito would also allow SRP and custom auth. Only the hosted
+        # login and token refresh are needed.
+        cfn_client: cognito.CfnUserPoolClient = client.node.default_child
+        cfn_client.explicit_auth_flows = ["ALLOW_REFRESH_TOKEN_AUTH"]
+        if google:
+            client.node.add_dependency(google)
+        return client
+
+    def _post_confirmation_fn(self) -> lambda_.Function:
+        log_group = logs.LogGroup(
+            self,
+            "PostConfirmationLogs",
+            retention=logs.RetentionDays.ONE_MONTH,
+            removal_policy=RemovalPolicy.DESTROY,
+        )
+        fn = lambda_.Function(
+            self,
+            "PostConfirmationFn",
+            runtime=lambda_.Runtime.PYTHON_3_12,
+            handler="handler.handler",
+            code=lambda_.Code.from_asset(
+                str(LAMBDAS_DIR / "post_confirmation"), exclude=["__pycache__", "*.pyc"]
+            ),
+            timeout=Duration.seconds(10),
+            log_group=log_group,
+        )
+        # The pool ARN would make a cycle (the pool references this function),
+        # so the grant covers user pools of this account and region; the
+        # function only ever acts on the pool that invoked it.
+        fn.add_to_role_policy(
+            iam.PolicyStatement(
+                actions=["cognito-idp:AdminAddUserToGroup"],
+                resources=[
+                    self.format_arn(service="cognito-idp", resource="userpool", resource_name="*")
+                ],
+            )
+        )
+        return fn
 
     def _budget(self, email: str | None, amount_usd: float) -> None:
         if not email:
