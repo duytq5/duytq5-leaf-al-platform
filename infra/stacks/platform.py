@@ -746,8 +746,8 @@ class PlatformStack(Stack):
         no token, so every install gets model updates; API Gateway throttles it.
 
         The Lambda reads and writes Postgres, so it runs in the Lambda subnet;
-        it signs S3 download and upload links locally and needs no other AWS
-        call.
+        it signs S3 download and upload links locally and reads round
+        selections through the S3 gateway endpoint; it makes no other AWS call.
         """
         upload_limit = int(
             self.node.try_get_context("uploadDailyLimit") or DEFAULT_UPLOAD_DAILY_LIMIT
@@ -780,14 +780,32 @@ class PlatformStack(Stack):
                 "DATA_BUCKET": self.data_bucket.bucket_name,
                 # A deploy setting: the Lambda has no route to SSM.
                 "UPLOAD_DAILY_LIMIT": str(upload_limit),
+                # Links in the admin API: a round's Label Studio project, and
+                # its MLflow run, which admins open through `scripts/ec2.sh tunnel`.
+                "LABEL_STUDIO_URL": f"https://{self.label_studio_domain}",
+                "MLFLOW_URL": "http://localhost:5000",
             },
             log_group=log_group,
         )
         # Presigned links work only for what the signer may do: download
-        # released models, upload app images to incoming/.
+        # released models, upload app images to incoming/. A round's
+        # selection file gives its phase (GET /v1/rounds/...). Without
+        # ListBucket a missing file is AccessDenied, not NoSuchKey; S3 checks it
+        # on the bucket with no prefix, so it cannot be narrowed to selections/
+        # (key names only; the Lambda reads them from Postgres anyway).
         fn.add_to_role_policy(
             iam.PolicyStatement(
-                actions=["s3:GetObject"], resources=[self.models_bucket.arn_for_objects("edge/*")]
+                actions=["s3:GetObject"],
+                resources=[
+                    self.models_bucket.arn_for_objects("edge/*"),
+                    self.data_bucket.arn_for_objects("selections/*"),
+                ],
+            )
+        )
+        fn.add_to_role_policy(
+            iam.PolicyStatement(
+                actions=["s3:ListBucket"],
+                resources=[self.data_bucket.bucket_arn],
             )
         )
         fn.add_to_role_policy(

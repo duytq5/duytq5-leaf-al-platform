@@ -83,14 +83,29 @@ def _api_policy(t: Template) -> list[dict]:
     ]
 
 
-def test_api_lambda_may_only_read_models_and_upload_to_incoming(t):
+def test_api_lambda_may_only_read_models_and_selections_and_upload_to_incoming(t):
     # Presigned links work only for what the signer may do.
     statements = {s["Action"]: s for s in _api_policy(t)}
-    assert set(statements) == {"s3:GetObject", "s3:PutObject"}
-    read = json.dumps(statements["s3:GetObject"]["Resource"])
+    assert set(statements) == {"s3:GetObject", "s3:PutObject", "s3:ListBucket"}
+    read = statements["s3:GetObject"]["Resource"]
+    assert len(read) == 2
+    read = json.dumps(read)
     assert "ModelsBucket" in read and "/edge/*" in read
+    # A round's selection file gives its phase (GET /v1/rounds/...).
+    assert "DataBucket" in read and "/selections/*" in read
+    # ListBucket makes a missing selection a 404 (NoSuchKey) instead of a 403.
+    listing = statements["s3:ListBucket"]
+    assert listing["Resource"]["Fn::GetAtt"][0].startswith("DataBucket")
     write = json.dumps(statements["s3:PutObject"]["Resource"])
     assert "DataBucket" in write and "/incoming/*" in write
+
+
+def test_admin_links(t):
+    env = _api_fn(t)["Environment"]["Variables"]
+    ls = json.dumps(env["LABEL_STUDIO_URL"])
+    assert ls.startswith('{"Fn::Join"') and "https://" in ls and ".sslip.io" in ls
+    # MLflow has no public address: admins open it through `scripts/ec2.sh tunnel`.
+    assert env["MLFLOW_URL"] == "http://localhost:5000"
 
 
 def test_upload_limit_setting(t):

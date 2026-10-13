@@ -1,4 +1,4 @@
-"""What the routes need from outside: Postgres, S3 signing, settings.
+"""What the routes need from outside: Postgres, S3, settings.
 
 FastAPI dependencies, so tests swap them (`app.dependency_overrides`).
 
@@ -6,18 +6,21 @@ The Lambda runs in the VPC's private subnet next to the EC2 host and reuses
 one Postgres connection across requests (a Lambda container serves one
 request at a time); a dropped one (the host was stopped) is reopened on the
 next request. Presigning S3 URLs is local
-signing with the Lambda's credentials, with no AWS call, so the Lambda needs
-no route to the internet.
+signing with the Lambda's credentials, with no AWS call; the few S3 reads
+(a round's selection) go through the VPC's S3 gateway endpoint. The Lambda
+needs no route to the internet.
 """
 
 import base64
 import os
 from dataclasses import dataclass
 from functools import cache
+from typing import Annotated
 
 import boto3
 import psycopg
 from botocore.config import Config
+from fastapi import Depends
 
 from lambdas.postgres import open_db
 
@@ -52,6 +55,8 @@ class Settings:
     data_bucket: str
     # Captures one uploader may send in any 24 hours (design doc, sign in to contribute).
     upload_daily_limit: int
+    label_studio_url: str
+    mlflow_url: str
 
 
 @cache
@@ -60,6 +65,8 @@ def get_settings() -> Settings:
         models_bucket=os.environ["MODELS_BUCKET"],
         data_bucket=os.environ["DATA_BUCKET"],
         upload_daily_limit=int(os.environ["UPLOAD_DAILY_LIMIT"]),
+        label_studio_url=os.environ["LABEL_STUDIO_URL"],
+        mlflow_url=os.environ["MLFLOW_URL"],
     )
 
 
@@ -93,3 +100,24 @@ def presign_put(
         "x-amz-checksum-sha256": checksum,
     }
     return url, headers
+
+
+class DataStore:
+    """Reads small files from the data bucket (a round's selection)."""
+
+    def __init__(self, s3, bucket: str) -> None:
+        self.s3 = s3
+        self.bucket = bucket
+
+    def get(self, key: str) -> bytes | None:
+        # A missing key is NoSuchKey only with s3:ListBucket; without it S3 says 403.
+        try:
+            return self.s3.get_object(Bucket=self.bucket, Key=key)["Body"].read()
+        except self.s3.exceptions.NoSuchKey:
+            return None
+
+
+def get_data_store(
+    s3: Annotated[object, Depends(get_s3)], settings: Annotated[Settings, Depends(get_settings)]
+) -> DataStore:
+    return DataStore(s3, settings.data_bucket)

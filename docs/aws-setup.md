@@ -95,7 +95,7 @@ export CDK_DEFAULT_ACCOUNT=$(aws sts get-caller-identity --query Account --outpu
 | AWS Budget | Monthly cost budget, email at 80 % actual and 100 % forecast. Only created when `budgetEmail` is set. |
 | Cognito user pool | Sign-in for people (section 6). Groups `admins`, `labelers`, `uploaders`; self sign-up off; email sign-in; optional TOTP MFA; hosted login domain; public PKCE clients `mobile` and `admin-web`, and the confidential client `label-studio` for the Label Studio gate. Kept on `cdk destroy`. |
 | Post-confirmation Lambda | Adds users who signed in with Google to `uploaders`. Logs kept 30 days. |
-| HTTP API + API Lambda | API Gateway HTTP API; every route needs a Cognito access token (JWT authorizer, 401 without one) except the app's public `GET /v1/crops` and `GET /v1/devices/config`; throttled to 10 requests/s (burst 20). One FastAPI Lambda (`api/`) checks groups; it runs in the Lambdas' subnet to use Postgres, signs download links for `edge/` in the models bucket, and signs upload links for `incoming/` in the data bucket (`POST /v1/captures`, `uploaders` only, at most `uploadDailyLimit` images per user in 24 hours, default 100). While the EC2 host is stopped it answers `503`. Logs kept 30 days. |
+| HTTP API + API Lambda | API Gateway HTTP API; every route needs a Cognito access token (JWT authorizer, 401 without one) except the app's public `GET /v1/crops` and `GET /v1/devices/config`; throttled to 10 requests/s (burst 20). One FastAPI Lambda (`api/`) checks groups; it runs in the Lambdas' subnet to use Postgres, signs download links for `edge/` in the models bucket, and signs upload links for `incoming/` in the data bucket (`POST /v1/captures`, `uploaders` only, at most `uploadDailyLimit` images per user in 24 hours, default 100). Labelers and admins read round progress (`GET /v1/rounds/active`, admins also `GET /v1/rounds/{id}`) and admins read dataset versions (`GET /v1/datasets/{name}/versions[/{n}]`); for a round's phase it reads `selections/` in the data bucket. While the EC2 host is stopped it answers `503`. Logs kept 30 days. |
 | Label Studio webhook | `POST /v1/hooks/label-studio` on the same API, no token: Label Studio sends the shared secret header instead. A Lambda outside the VPC checks it, has a Lambda in the VPC store the label, and resumes the round once all k images are done. |
 | Upload validation | App images land in `incoming/` of the data bucket; S3 notifies the `UploadQueue` (SQS), and `UploadFn` in the Lambdas' subnet checks each one (a whole JPEG or PNG of the declared type and SHA-256), turns it upright, strips EXIF, writes it to `raw/{dataset}/` and adds it to the train pool. Refused files are deleted. While the host is stopped, messages retry every 15 minutes for about a day, then wait 14 days in `UploadDlq`; unprocessed files in `incoming/` expire after 14 days. |
 
@@ -514,6 +514,14 @@ curl -s "$API_URL/v1/devices/config?dataset=rocole"
 
 `/v1/crops` lists only datasets with a released model, so it is `{"crops": []}`
 and `/v1/devices/config` is `404` until the first model release.
+
+The admin routes need an access token of a user in `admins` (or `labelers` for
+the active rounds):
+
+```bash
+curl -s -H "Authorization: Bearer $TOKEN" "$API_URL/v1/rounds/active"
+curl -s -H "Authorization: Bearer $TOKEN" "$API_URL/v1/datasets/rocole/versions"
+```
 
 ### Uploads stuck in the DLQ
 
