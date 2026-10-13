@@ -60,8 +60,10 @@ from aws_cdk import aws_cognito as cognito
 from aws_cdk import aws_ec2 as ec2
 from aws_cdk import aws_iam as iam
 from aws_cdk import aws_lambda as lambda_
+from aws_cdk import aws_lambda_event_sources as lambda_events
 from aws_cdk import aws_logs as logs
 from aws_cdk import aws_s3 as s3
+from aws_cdk import aws_s3_notifications as s3n
 from aws_cdk import aws_sqs as sqs
 from aws_cdk import aws_ssm as ssm
 from constructs import Construct
@@ -104,6 +106,12 @@ JOB_VISIBILITY_TIMEOUT = Duration.minutes(30)
 # Jobs wait in the queue while the GPU machine is off.
 JOB_RETENTION = Duration.days(14)
 JOB_MAX_RECEIVES = 3
+# App uploads (incoming/) wait in a queue for the validation Lambda. While the
+# EC2 host is stopped Postgres is unreachable: a message comes back every
+# 15 minutes for about a day, then waits two weeks in the DLQ for a redrive.
+UPLOAD_VISIBILITY_TIMEOUT = Duration.minutes(15)
+UPLOAD_MAX_RECEIVES = 100
+UPLOAD_RETENTION = Duration.days(14)
 
 AL2023_AMI_PARAM = "/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64"
 DOCKER_COMPOSE_VERSION = "v2.29.7"
@@ -190,6 +198,7 @@ class PlatformStack(Stack):
         self._auth(ctx)
         self._api()
         self._label_studio()
+        self._upload_validation()
 
         CfnOutput(self, "DataBucketName", value=self.data_bucket.bucket_name)
         CfnOutput(self, "ModelsBucketName", value=self.models_bucket.bucket_name)
@@ -891,6 +900,69 @@ class PlatformStack(Stack):
             ],
         )
         CfnOutput(self, "LabelStudioUrl", value=f"https://{self.label_studio_domain}")
+
+    def _upload_validation(self) -> None:
+        """App images: S3 incoming/ -> UploadQueue -> UploadFn (design doc F1
+        step 6, lambdas/upload.py), which moves good images to raw/ and the
+        train pool. In the VPC for Postgres; S3 through the gateway endpoint."""
+        data = self.data_bucket
+        dlq = sqs.Queue(
+            self,
+            "UploadDlq",
+            retention_period=UPLOAD_RETENTION,
+            encryption=sqs.QueueEncryption.SQS_MANAGED,
+            enforce_ssl=True,
+        )
+        queue = sqs.Queue(
+            self,
+            "UploadQueue",
+            visibility_timeout=UPLOAD_VISIBILITY_TIMEOUT,
+            retention_period=UPLOAD_RETENTION,
+            encryption=sqs.QueueEncryption.SQS_MANAGED,
+            enforce_ssl=True,
+            dead_letter_queue=sqs.DeadLetterQueue(queue=dlq, max_receive_count=UPLOAD_MAX_RECEIVES),
+        )
+        data.add_event_notification(
+            s3.EventType.OBJECT_CREATED,
+            s3n.SqsDestination(queue),
+            s3.NotificationKeyFilter(prefix="incoming/"),
+        )
+        # Anything never processed (the DLQ keeps messages 14 days) goes away.
+        data.add_lifecycle_rule(
+            id="expire-unprocessed-uploads", prefix="incoming/", expiration=UPLOAD_RETENTION
+        )
+        fn = lambda_.Function(
+            self,
+            "UploadFn",
+            runtime=lambda_code.RUNTIME,
+            code=lambda_code.UPLOAD.code(),
+            handler="lambdas.upload.handler",
+            timeout=Duration.seconds(60),
+            memory_size=1024,
+            vpc=self.vpc,
+            vpc_subnets=ec2.SubnetSelection(subnets=[self.lambda_subnet]),
+            security_groups=[self.lambda_sg],
+            environment={**self._postgres_environment(), "DATA_BUCKET": data.bucket_name},
+            log_group=logs.LogGroup(
+                self,
+                "UploadLogs",
+                retention=logs.RetentionDays.ONE_MONTH,
+                removal_policy=RemovalPolicy.DESTROY,
+            ),
+        )
+        fn.add_event_source(
+            lambda_events.SqsEventSource(queue, batch_size=5, report_batch_item_failures=True)
+        )
+        fn.add_to_role_policy(
+            iam.PolicyStatement(
+                actions=["s3:GetObject", "s3:DeleteObject"],
+                resources=[data.arn_for_objects("incoming/*")],
+            )
+        )
+        fn.add_to_role_policy(
+            iam.PolicyStatement(actions=["s3:PutObject"], resources=[data.arn_for_objects("raw/*")])
+        )
+        CfnOutput(self, "UploadDlqUrl", value=dlq.queue_url)
 
     def _post_confirmation_fn(self) -> lambda_.Function:
         log_group = logs.LogGroup(

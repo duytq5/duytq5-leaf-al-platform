@@ -1679,6 +1679,7 @@ infra = [
 ]
 lambdas = [
     { name = "boto3" },
+    { name = "pillow" },
 ]
 worker = [
     { name = "boto3" },
@@ -1704,6 +1705,7 @@ requires-dist = [
     { name = "mangum", marker = "extra == 'api'", specifier = ">=0.19" },
     { name = "mlflow", marker = "extra == 'worker'", specifier = ">=3.0" },
     { name = "numpy", specifier = ">=1.26" },
+    { name = "pillow", marker = "extra == 'lambdas'", specifier = ">=11" },
     { name = "psycopg", extras = ["binary"], specifier = ">=3.2" },
     { name = "pyarrow", specifier = ">=17" },
     { name = "pydantic", specifier = ">=2.7" },

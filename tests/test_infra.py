@@ -98,7 +98,8 @@ def test_only_models_bucket_is_versioned(full):
 
 
 def test_job_queue_has_dlq_and_long_polling(full):
-    full.resource_count_is("AWS::SQS::Queue", 2)
+    # The job queue and its DLQ, and the upload queue and its DLQ (tests/test_upload_infra.py).
+    full.resource_count_is("AWS::SQS::Queue", 4)
     full.has_resource_properties(
         "AWS::SQS::Queue",
         {

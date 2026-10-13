@@ -29,6 +29,8 @@ worker = [
 ]
 lambdas = [
     "boto3>=1.34",
+    # Upload validation: decode, orient and re-encode app images.
+    "pillow>=11",
 ]
 # Edge/Admin API (FastAPI on Lambda). infra/lambda_code.py bundles the
 # versions in uv.lock.
