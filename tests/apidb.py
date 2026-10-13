@@ -12,8 +12,14 @@ REGION = "ap-southeast-2"
 MODELS_BUCKET = "leaf-al-models"
 DATA_BUCKET = "leaf-al-data"
 UPLOAD_LIMIT = 3
+LABEL_STUDIO_URL = "https://label.example.com"
+MLFLOW_URL = "http://localhost:5000"
 SETTINGS = Settings(
-    models_bucket=MODELS_BUCKET, data_bucket=DATA_BUCKET, upload_daily_limit=UPLOAD_LIMIT
+    models_bucket=MODELS_BUCKET,
+    data_bucket=DATA_BUCKET,
+    upload_daily_limit=UPLOAD_LIMIT,
+    label_studio_url=LABEL_STUDIO_URL,
+    mlflow_url=MLFLOW_URL,
 )
 SHA = "ab" * 32
 
