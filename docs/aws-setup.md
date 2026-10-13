@@ -85,16 +85,18 @@ export CDK_DEFAULT_ACCOUNT=$(aws sts get-caller-identity --query Account --outpu
 | S3 models bucket (`al-models`) | Same, plus versioning (old versions expire after 90 days). Kept on `cdk destroy`. |
 | SQS job queue + dead-letter queue | 20 s long polling, 30 min visibility, 14-day retention, a job goes to the DLQ after 3 failed receives. |
 | IAM user for the GPU worker | SSM port forwarding to the host only (no shell), consume jobs, report Step Functions task results, read `raw/` and `manifests/`, write `scores/`, read/write `mlflow-artifacts/`. No access key: you create it (section 4). |
-| VPC + EC2 instance | One public subnet for the host, no NAT gateway. Amazon Linux 2023, `t3.medium` (2 vCPU, 4 GB), IMDSv2, no SSH key: connect with Session Manager. Docker, compose and cron installed, then Postgres + MLflow started on first boot. |
+| VPC + EC2 instance | One public subnet for the host, no NAT gateway. Amazon Linux 2023, `t3.medium` (2 vCPU, 4 GB), IMDSv2, no SSH key: connect with Session Manager. Docker, compose and cron installed, then Postgres, MLflow and Label Studio (behind Caddy and oauth2-proxy) started on first boot. |
+| Elastic IP | The host's fixed public address, so Label Studio's URL and its Cognito callback survive stop and start. About $3.60 a month, charged also while the instance is stopped. |
 | EBS data volume (`/data`) | gp3 20 GB, encrypted, mounted at `/data` on first boot. Kept when the instance or the stack is deleted. |
-| Security group | Only Postgres (5432) from the Lambdas' security group. You and the worker reach MLflow (5000) and Postgres (5432) through SSM port forwarding (section 3). |
+| Security group | 80 and 443 from anywhere (Label Studio through Caddy and the Cognito gate); Postgres (5432) and Label Studio's API (8080) from the Lambdas' security group only. You and the worker reach MLflow (5000) and Postgres (5432) through SSM port forwarding (section 3). |
 | Lambda subnet | Private subnet on a second address range (10.1.0.0/24), no internet route; S3 through a free gateway endpoint. |
-| `al-round` state machine + 6 Lambdas | One AL round: mark running, snapshot, train and score jobs on SQS, select, wait for labels, merge; on any error the round is marked failed and its queued images go back to the pool. ARN in SSM `/leaf-al/state-machines/al-round`. Lambda logs kept 30 days. |
-| SSM parameters | `/leaf-al/buckets/data`, `/leaf-al/buckets/models`, `/leaf-al/queues/jobs-url`. |
+| `al-round` state machine + 7 Lambdas | One AL round: mark running, snapshot, train and score jobs on SQS, select, wait for labels (the round's Label Studio project, section 3b), merge; on any error the round is marked failed and its queued images go back to the pool. ARN in SSM `/leaf-al/state-machines/al-round`. Lambda logs kept 30 days. |
+| SSM parameters | `/leaf-al/buckets/data`, `/leaf-al/buckets/models`, `/leaf-al/queues/jobs-url`, and for Label Studio `/leaf-al/auth/user-pool-id`, `/leaf-al/label-studio/domain`, `/leaf-al/label-studio/client-id`. |
 | AWS Budget | Monthly cost budget, email at 80 % actual and 100 % forecast. Only created when `budgetEmail` is set. |
-| Cognito user pool | Sign-in for people (section 6). Groups `admins`, `labelers`, `uploaders`; self sign-up off; email sign-in; optional TOTP MFA; hosted login domain; public PKCE clients `mobile` and `admin-web`. Kept on `cdk destroy`. |
+| Cognito user pool | Sign-in for people (section 6). Groups `admins`, `labelers`, `uploaders`; self sign-up off; email sign-in; optional TOTP MFA; hosted login domain; public PKCE clients `mobile` and `admin-web`, and the confidential client `label-studio` for the Label Studio gate. Kept on `cdk destroy`. |
 | Post-confirmation Lambda | Adds users who signed in with Google to `uploaders`. Logs kept 30 days. |
 | HTTP API + API Lambda | API Gateway HTTP API; every route needs a Cognito access token (JWT authorizer, 401 without one), throttled to 10 requests/s (burst 20). One FastAPI Lambda (`api/`) checks groups. Logs kept 30 days. |
+| Label Studio webhook | `POST /v1/hooks/label-studio` on the same API, no token: Label Studio sends the shared secret header instead. A Lambda outside the VPC checks it, has a Lambda in the VPC store the label, and resumes the round once all k images are done. |
 
 Deploy-time settings are CDK context values (`-c key=value`):
 
@@ -108,6 +110,7 @@ Deploy-time settings are CDK context values (`-c key=value`):
 | `googleClientId` | none (no Google sign-in) | Google OAuth client id (section 6) |
 | `mobileCallbackUrls` | `leafal://auth/callback` | Comma-separated sign-in redirects of the app |
 | `adminCallbackUrls` | `http://localhost:8080/auth/callback` | Comma-separated sign-in redirects of admin tools |
+| `labelStudioDomain` | `<Elastic IP>.sslip.io` | Label Studio's host name. The default needs no domain: sslip.io resolves it to the IP, and Caddy gets a Let's Encrypt certificate for it |
 
 ## 1. Secrets in SSM Parameter Store (before the first deploy)
 
@@ -148,6 +151,21 @@ aws secretsmanager create-secret --name leaf-al/postgres-password --secret-strin
 
 If you ever change the password, update both copies and deploy again.
 
+Label Studio needs five values in one Secrets Manager secret (about $0.40 a
+month): its admin account, the admin's API token (the label step Lambdas use
+it), the webhook secret Label Studio sends back to the API, and the cookie
+secret of the Cognito gate. Use your own email for `admin_email`. Create it
+once, before the first deploy that includes Label Studio:
+
+```bash
+aws secretsmanager create-secret --name leaf-al/label-studio --secret-string "{\"admin_email\":\"you@example.com\",\"admin_password\":\"$(openssl rand -hex 16)\",\"api_token\":\"$(openssl rand -hex 20)\",\"webhook_secret\":\"$(openssl rand -hex 24)\",\"cookie_secret\":\"$(openssl rand -hex 16)\"}"
+```
+
+Read the admin password back when you need it:
+`aws secretsmanager get-secret-value --secret-id leaf-al/label-studio --query SecretString --output text`.
+Label Studio takes the account and token only on its first start; to change
+them later, change them in Label Studio too.
+
 The stack writes the bucket names and queue URL to SSM itself.
 
 ## 2. CDK stack
@@ -175,7 +193,8 @@ AWS sends a confirmation email for the Budget alert subscription; confirm it.
 The deploy prints these outputs; you need them below:
 `DataBucketName`, `ModelsBucketName`, `JobQueueUrl`, `JobDlqUrl`,
 `WorkerUserName`, `InstanceId`, `DataVolumeId`, `UserPoolId`,
-`MobileClientId`, `AdminWebClientId`, `AuthDomainUrl`, `ApiUrl`.
+`MobileClientId`, `AdminWebClientId`, `AuthDomainUrl`, `ApiUrl`,
+`LabelStudioUrl`.
 
 `cdk deploy` builds the API Lambda bundle with `uv` (Linux wheels, no Docker
 needed); without `uv` on the PATH it falls back to Docker.
@@ -204,7 +223,7 @@ storage until you delete them by hand (S3 console, or `aws s3 rb --force` and
 `aws ec2 delete-volume --volume-id <DataVolumeId>`). A later deploy creates a
 new, empty volume and new buckets; restore Postgres from a backup (section 5).
 
-## 3. EC2 services (Postgres + MLflow)
+## 3. EC2 services (Postgres, MLflow, Label Studio)
 
 Nothing to do by hand on a new instance. First boot mounts `/data`, clones this
 repo to `/home/ec2-user/duytq5-leaf-al-platform` and runs
@@ -353,6 +372,40 @@ The seed uploads with your own AWS credentials: it needs `s3:PutObject` and
 profile has them). There is no durian config yet: add
 `configs/datasets/durian.yaml` once its class list is settled.
 
+## 3b. Label Studio
+
+Label Studio runs on the host next to Postgres and MLflow, with its projects
+in a `labelstudio` database (so the nightly backup covers it). The way in:
+
+```
+browser -> https://<LabelStudioUrl> (Caddy, Let's Encrypt)
+        -> oauth2-proxy: Cognito sign-in, only groups labelers and admins
+        -> Label Studio sign-in with the person's own Label Studio account
+```
+
+Two sign-ins, on purpose (design doc decision 2026-10-05): Label Studio
+Community has no SSO. `scripts/ec2.sh setup` (section 3) starts it all after
+the deploy; Caddy needs a minute for the certificate the first time.
+
+1. Open `LabelStudioUrl`, sign in with your Cognito admin account (section 6),
+   then with `admin_email` and `admin_password` from the secret.
+2. For each labeler: create the Cognito account in group `labelers`
+   (section 6), then in Label Studio open Organization, "Add People", and send
+   them the invite link. Open sign-up is off; the link is the only way in.
+
+You never create projects by hand. When a round reaches its label step, the
+step makes a project named `ACTIVE <dataset> <round id>` with one task per
+selected image and the round model's guess preselected. Labelers confirm or
+correct each one, or pick "Không phải lá" (not a leaf). Every submit is copied
+to the `labels` table; when all k images are done the round goes on to merge
+and the project is renamed `DONE ...`. Edits after submit are not recorded,
+and skipping is turned off, so each task needs an answer.
+
+If the label step fails with `LabelStudioError`, the instance was probably
+stopped or Label Studio was restarting; the step retries for a few minutes on
+its own. Check the containers with `scripts/ec2.sh shell`, then
+`cd ~/duytq5-leaf-al-platform/deploy/ec2 && docker compose ps`.
+
 ## 4. Worker credentials (on the RTX 5070 machine)
 
 The stack creates the worker's IAM user but not its access key, so the key
@@ -453,6 +506,5 @@ from the login page (`Authorization: Bearer <token>`), `/v1/me` returns your
 
 ## 7. Later
 
-The API, the worker's train and score jobs, Label Studio with its webhook
-(which resumes a round waiting for labels) and the GitHub start-round
-workflow are added by later PRs; this file gets their steps as they land.
+The worker's train and score jobs and the GitHub start-round workflow are
+added by later PRs; this file gets their steps as they land.

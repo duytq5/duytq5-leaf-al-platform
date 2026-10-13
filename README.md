@@ -13,9 +13,9 @@ uploads images and downloads ONNX models.
 | `db/` | Postgres schema (`db/migrations/*.sql`), migration runner, dataset seed script |
 | `selection/` | Selection strategy registry (`@register("name")`) and the built-in strategies |
 | `worker/` | Local GPU worker: long-polls SQS, runs `train` / `score` / `export` jobs |
-| `lambdas/` | Lambda handlers: the `al-round` steps (`round.py`); later edge API, validation, Label Studio webhook |
+| `lambdas/` | Lambda handlers: the `al-round` steps (`round.py`), the label step and Label Studio webhook (`labeling.py`, `label_studio_hook.py`); later edge API, validation |
 | `infra/` | AWS CDK app (Python), one stack: `LeafAlPlatform` |
-| `deploy/ec2/` | Docker Compose for the single EC2 instance: Postgres + MLflow |
+| `deploy/ec2/` | Docker Compose for the single EC2 instance: Postgres, MLflow, Label Studio behind Caddy and oauth2-proxy |
 | `cli/` | Operator CLI `al` |
 | `configs/datasets/` | YAML dataset configs: the class list (code + display name) and the fixed train/val/test split |
 | `configs/train/` | YAML training configs |

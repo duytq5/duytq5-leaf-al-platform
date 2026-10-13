@@ -54,8 +54,11 @@ def test_groups_created(bare):
 
 def test_public_pkce_clients(bare):
     clients = _clients(bare)
-    assert set(clients) == {"admin-web", "mobile"}
-    for props in clients.values():
+    # label-studio is oauth2-proxy's server-side client (tests/test_label_studio_infra.py).
+    assert set(clients) == {"admin-web", "mobile", "label-studio"}
+    for name, props in clients.items():
+        if name == "label-studio":
+            continue
         assert props.get("GenerateSecret", False) is False  # public client, PKCE
         assert props["AllowedOAuthFlows"] == ["code"]
         assert props["AllowedOAuthFlowsUserPoolClient"] is True

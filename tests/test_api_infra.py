@@ -57,12 +57,13 @@ def test_http_api_with_cognito_jwt_authorizer(t):
 
 
 def test_every_route_needs_a_token(t):
-    routes = t.find_resources("AWS::ApiGatewayV2::Route")
-    assert routes
-    for route in routes.values():
-        assert route["Properties"]["AuthorizationType"] == "JWT"
-    keys = sorted(r["Properties"]["RouteKey"] for r in routes.values())
-    assert keys == ["ANY /v1/{proxy+}"]
+    routes = {
+        r["Properties"]["RouteKey"]: r["Properties"]["AuthorizationType"]
+        for r in t.find_resources("AWS::ApiGatewayV2::Route").values()
+    }
+    # The Label Studio webhook proves itself with a shared secret instead
+    # (tests/test_label_studio_infra.py).
+    assert routes == {"ANY /v1/{proxy+}": "JWT", "POST /v1/hooks/label-studio": "NONE"}
 
 
 def test_stage_is_throttled(t):
