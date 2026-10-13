@@ -4,7 +4,9 @@
   any error -> ReleaseFailed (nothing to undo: only Record writes, in one transaction)
 
 Execution input: common.release.ReleaseExecution, set by the `release`
-workflow when a change to configs/releases/{dataset}.yaml merges.
+workflow when a change to configs/releases/{dataset}.yaml merges. The export
+job runs in the worker image of the commit that trained the model (Prepare
+finds it), so it uses the recipe code the model was trained with.
 
 The export waits for the worker at most RELEASE_JOB_TIMEOUT, the longest a
 GitHub job may wait for the execution, so the commit check shows how the
@@ -26,7 +28,7 @@ from infra.stacks.al_round import TRANSIENT_ERRORS
 STATE_MACHINE_NAME = "model-release"
 RELEASE_JOB_TIMEOUT = Duration.hours(6)
 
-EXECUTION_FIELDS = ("dataset", "model", "version", "image", "released_by", "commit_sha")
+EXECUTION_FIELDS = ("dataset", "model", "version", "released_by", "commit_sha")
 
 
 class ModelRelease(Construct):
@@ -95,7 +97,7 @@ class ModelRelease(Construct):
                 {
                     "job_id": sfn.JsonPath.string_at("$.prepare.job_id"),
                     "type": "export",
-                    "image": sfn.JsonPath.string_at("$.image"),
+                    "image": sfn.JsonPath.string_at("$.prepare.image"),
                     "task_token": sfn.JsonPath.task_token,
                     "spec": sfn.JsonPath.object_at("$.prepare.spec"),
                 }

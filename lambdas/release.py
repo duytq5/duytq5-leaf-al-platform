@@ -1,7 +1,8 @@
 """Lambda steps of the model-release state machine (design doc F5).
 
   prepare  checks the release names a model version of the dataset and builds
-           the export job from it
+           the export job from it, to run in the worker image of the commit
+           that trained the model (the same recipe code)
   (export: SQS job the worker runs; it skips the export when the model is
            already in edge/, writes model.onnx then manifest.json, and moves
            the MLflow aliases)
@@ -23,6 +24,7 @@ import psycopg
 from common.jobs import ExportSpec
 from common.release import ExportResult, ReleaseExecution, export_job_uuid
 from common.s3keys import edge_prefix
+from common.types import WORKER_IMAGE_REPO
 from lambdas.postgres import open_db
 
 
@@ -31,7 +33,7 @@ class ReleaseError(RuntimeError):
 
 
 _VERSION = """
-    SELECT mv.id, mv.labels, mv.onnx_sha256
+    SELECT mv.id, mv.labels, mv.onnx_sha256, r.commit_sha
       FROM model_versions mv
       JOIN rounds r ON r.id = mv.round_id
       JOIN datasets d ON d.id = r.dataset_id
@@ -49,7 +51,7 @@ _CURRENT = """
 """
 
 
-def _version(conn: psycopg.Connection, ev: ReleaseExecution) -> tuple[int, list, str | None]:
+def _version(conn: psycopg.Connection, ev: ReleaseExecution) -> tuple[int, list, str | None, str]:
     row = conn.execute(_VERSION, (ev.dataset, ev.model, ev.version)).fetchone()
     if row is None:
         raise ReleaseError(
@@ -60,13 +62,17 @@ def _version(conn: psycopg.Connection, ev: ReleaseExecution) -> tuple[int, list,
 
 def prepare(conn: psycopg.Connection, ev: ReleaseExecution) -> dict[str, Any]:
     """The export job for the released version."""
-    _, labels, _ = _version(conn, ev)
+    _, labels, _, trained_at = _version(conn, ev)
     spec = ExportSpec(
         model_uri=f"models:/{ev.model}/{ev.version}",
         output_prefix=edge_prefix(ev.model, ev.version),
         labels=labels,
     )
-    return {"job_id": str(export_job_uuid(ev)), "spec": spec.model_dump(mode="json")}
+    return {
+        "job_id": str(export_job_uuid(ev)),
+        "image": f"{WORKER_IMAGE_REPO}:{trained_at}",
+        "spec": spec.model_dump(mode="json"),
+    }
 
 
 def record(conn: psycopg.Connection, ev: ReleaseExecution, export: ExportResult) -> dict[str, Any]:
@@ -79,7 +85,7 @@ def record(conn: psycopg.Connection, ev: ReleaseExecution, export: ExportResult)
         ).fetchone()
         if dataset is None:
             raise ReleaseError(f"no dataset {ev.dataset}")
-        version_id, _, exported_sha = _version(conn, ev)
+        version_id, _, exported_sha, _ = _version(conn, ev)
         if exported_sha is None:
             conn.execute(
                 "UPDATE model_versions SET onnx_s3_key = %s, onnx_sha256 = %s,"

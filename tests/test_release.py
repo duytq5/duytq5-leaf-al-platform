@@ -21,7 +21,8 @@ from tests.apidb import SHA, crop, dataset, model
 
 ROOT = Path(__file__).resolve().parents[1]
 COMMIT = "e" * 40
-IMAGE = "ghcr.io/duytq5/duytq5-leaf-al-platform-worker:" + COMMIT
+# tests.apidb.model() trains every version in a round of commit "c" * 40.
+TRAINED_IMAGE = "ghcr.io/duytq5/duytq5-leaf-al-platform-worker:" + "c" * 40
 
 
 def _execution(version: int, commit: str = COMMIT, *, model_name="durian-fastvit", ds="durian"):
@@ -29,7 +30,6 @@ def _execution(version: int, commit: str = COMMIT, *, model_name="durian-fastvit
         dataset=ds,
         model=model_name,
         version=version,
-        image=IMAGE,
         released_by="duytq5",
         commit_sha=commit,
     )
@@ -146,6 +146,9 @@ def test_prepare_builds_the_export_job(db, durian):
     ev = _execution(2)
     out = release.prepare(db, ev)
     assert out["job_id"] == str(export_job_uuid(ev))
+    # The export runs in the image that trained the model: the same recipe
+    # code (preprocessing, transforms), whatever changed since.
+    assert out["image"] == TRAINED_IMAGE
     spec = ExportSpec.model_validate(out["spec"])
     assert spec.model_uri == "models:/durian-fastvit/2"
     assert spec.output_prefix == "edge/durian-fastvit/2/"

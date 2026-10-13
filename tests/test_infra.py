@@ -403,7 +403,7 @@ def test_release_waits_for_the_export_job(full):
     assert body["type"] == "export"
     assert body["task_token.$"] == "$$.Task.Token"
     assert body["job_id.$"] == "$.prepare.job_id"
-    assert body["image.$"] == "$.image"
+    assert body["image.$"] == "$.prepare.image"
     assert body["spec.$"] == "$.prepare.spec"
     # The release workflow waits as long as a GitHub job may run.
     assert export["TimeoutSeconds"] == 6 * 3600

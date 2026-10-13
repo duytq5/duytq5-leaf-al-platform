@@ -16,7 +16,7 @@ from uuid import UUID, uuid5
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, TypeAdapter
 
-from common.types import CommitSha, DatasetName, GitHubLogin, ModelName, Sha256, WorkerImage
+from common.types import CommitSha, DatasetName, GitHubLogin, ModelName, Sha256
 
 RELEASES_DIR = Path("configs/releases")
 # Namespace of export job ids (uuid5), fixed forever.
@@ -46,7 +46,6 @@ class ReleaseExecution(_Strict):
     dataset: DatasetName
     model: ModelName
     version: int = Field(ge=1)
-    image: WorkerImage  # the worker image of the release commit; runs the export job
     released_by: GitHubLogin  # who merged the release PR
     commit_sha: CommitSha
 
