@@ -1,9 +1,10 @@
 """Code assets for the Python Lambdas: some of the repo's packages plus the
 third-party libraries they import, for the Lambda runtime (Amazon Linux 2023, x86_64).
 
-Three bundles: ROUND for the al-round Lambdas (Postgres, Parquet, the
-selection strategies), API for the FastAPI Lambda (Postgres, no Parquet or
-numpy), which stays small, and UPLOAD for upload validation (Postgres, Pillow).
+Three bundles: ROUND for the al-round, model-release and round-control
+Lambdas (Postgres, Parquet, the selection strategies, the recipe registry),
+API for the FastAPI Lambda (Postgres, no Parquet or numpy), which stays small,
+and UPLOAD for upload validation (Postgres, Pillow).
 
 `cdk deploy` builds them on your machine with uv (no Docker needed): uv
 downloads the Linux wheels whatever OS you run on. Without uv, CDK falls back
@@ -107,7 +108,7 @@ class _UvBundling:
 
 
 ROUND = Bundle(
-    packages=("common", "db", "lambdas", "selection"),
+    packages=("common", "db", "lambdas", "recipes", "selection"),
     libraries=("numpy", "psycopg", "psycopg-binary", "pyarrow", "pydantic", "pyyaml"),
     # Lambda unzips code into at most 250 MB, and pyarrow alone is ~150 MB:
     # drop Arrow Flight, C headers and test suites.

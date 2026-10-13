@@ -355,14 +355,20 @@ def _merged(conn: psycopg.Connection, round_id: UUID) -> dict[str, Any]:
 
 
 def fail(conn: psycopg.Connection, store: Store, round_id: UUID) -> None:
-    """Round failed: its queued images go back to the pool. Only rows still
-    queued are touched, so a second call changes nothing."""
+    """Round failed: its queued images go back to the pool."""
+    end_round(conn, store, round_id, "failed")
+
+
+def end_round(conn: psycopg.Connection, store: Store, round_id: UUID, status: str) -> None:
+    """Round failed or cancelled: its queued images go back to the pool. Only
+    an unfinished round and images still queued are touched, so a second call
+    changes nothing."""
     ids = _selection(store, round_id) or []
     with conn.transaction():
         conn.execute(
-            "UPDATE rounds SET status = 'failed', finished_at = now(), label_task_token = NULL"
+            "UPDATE rounds SET status = %s, finished_at = now(), label_task_token = NULL"
             " WHERE id = %s AND status IN ('pending', 'running')",
-            (round_id,),
+            (status, round_id),
         )
         conn.execute(
             "UPDATE images SET status = 'unlabeled' WHERE id = ANY(%s) AND status = 'queued'",
