@@ -70,6 +70,7 @@ from constructs import Construct
 
 from infra import lambda_code
 from infra.stacks.al_round import AlRound
+from infra.stacks.model_release import ModelRelease
 
 # SSM Parameter Store layout. deploy/ec2/write-env.sh reads the same names.
 SSM_PREFIX = "/leaf-al"
@@ -84,6 +85,7 @@ SSM_POSTGRES_TLS_CA = f"{SSM_PREFIX}/postgres/tls-ca"
 # never in the template; a Lambda without internet access could not fetch it.
 POSTGRES_PASSWORD_SECRET = "leaf-al/postgres-password"
 SSM_AL_ROUND_ARN = f"{SSM_PREFIX}/state-machines/al-round"
+SSM_MODEL_RELEASE_ARN = f"{SSM_PREFIX}/state-machines/model-release"
 # Label Studio settings write-env.sh reads on the host.
 SSM_USER_POOL_ID = f"{SSM_PREFIX}/auth/user-pool-id"
 SSM_LABEL_STUDIO_DOMAIN = f"{SSM_PREFIX}/label-studio/domain"
@@ -194,6 +196,7 @@ class PlatformStack(Stack):
         self._ec2_host()
         self._lambda_network()
         self._al_round()
+        self._model_release()
         self._budget(ctx("budgetEmail"), float(ctx("budgetUsd") or 20))
         self._auth(ctx)
         self._api()
@@ -313,12 +316,20 @@ class PlatformStack(Stack):
                 resources=[models.arn_for_objects("mlflow-artifacts/*")],
             )
         )
+        # The export job (F5) publishes model.onnx and manifest.json for the app.
+        policy.add_statements(
+            iam.PolicyStatement(
+                sid="PublishModels",
+                actions=["s3:GetObject", "s3:PutObject"],
+                resources=[models.arn_for_objects("edge/*")],
+            )
+        )
         policy.add_statements(
             iam.PolicyStatement(
                 sid="ListMlflowArtifacts",
                 actions=["s3:ListBucket"],
                 resources=[models.bucket_arn],
-                conditions={"StringLike": {"s3:prefix": ["mlflow-artifacts/*"]}},
+                conditions={"StringLike": {"s3:prefix": ["mlflow-artifacts/*", "edge/*"]}},
             )
         )
         policy.add_statements(
@@ -566,6 +577,23 @@ class PlatformStack(Stack):
             string_value=al_round.state_machine.state_machine_arn,
         )
         CfnOutput(self, "AlRoundStateMachineArn", value=al_round.state_machine.state_machine_arn)
+
+    def _model_release(self) -> None:
+        release = ModelRelease(
+            self,
+            "ModelRelease",
+            vpc=self.vpc,
+            subnet=self.lambda_subnet,
+            security_group=self.lambda_sg,
+            environment=self._postgres_environment(),
+            job_queue=self.job_queue,
+        )
+        self.model_release = release
+        arn = release.state_machine.state_machine_arn
+        ssm.StringParameter(
+            self, "ModelReleaseArnParam", parameter_name=SSM_MODEL_RELEASE_ARN, string_value=arn
+        )
+        CfnOutput(self, "ModelReleaseStateMachineArn", value=arn)
 
     def _worker_tunnel(self, instance: ec2.Instance) -> None:
         """Let the worker open SSM port-forwarding sessions to the host (MLflow,
