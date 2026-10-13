@@ -2,7 +2,8 @@
 third-party libraries they import, for the Lambda runtime (Amazon Linux 2023, x86_64).
 
 Two bundles: ROUND for the al-round Lambdas (Postgres, Parquet, the selection
-strategies) and API for the FastAPI Lambda, which stays small.
+strategies) and API for the FastAPI Lambda (Postgres, no Parquet or numpy),
+which stays small.
 
 `cdk deploy` builds them on your machine with uv (no Docker needed): uv
 downloads the Linux wheels whatever OS you run on. Without uv, CDK falls back
@@ -124,7 +125,7 @@ ROUND = Bundle(
     ),
 )
 API = Bundle(
-    packages=("api",),
-    libraries=("fastapi", "mangum", "pydantic", "starlette"),
+    packages=("api", "common", "db", "lambdas"),
+    libraries=("fastapi", "mangum", "psycopg", "psycopg-binary", "pydantic", "pyyaml", "starlette"),
     prune=("bin",),
 )

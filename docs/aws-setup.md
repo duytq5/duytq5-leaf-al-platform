@@ -95,7 +95,7 @@ export CDK_DEFAULT_ACCOUNT=$(aws sts get-caller-identity --query Account --outpu
 | AWS Budget | Monthly cost budget, email at 80 % actual and 100 % forecast. Only created when `budgetEmail` is set. |
 | Cognito user pool | Sign-in for people (section 6). Groups `admins`, `labelers`, `uploaders`; self sign-up off; email sign-in; optional TOTP MFA; hosted login domain; public PKCE clients `mobile` and `admin-web`, and the confidential client `label-studio` for the Label Studio gate. Kept on `cdk destroy`. |
 | Post-confirmation Lambda | Adds users who signed in with Google to `uploaders`. Logs kept 30 days. |
-| HTTP API + API Lambda | API Gateway HTTP API; every route needs a Cognito access token (JWT authorizer, 401 without one), throttled to 10 requests/s (burst 20). One FastAPI Lambda (`api/`) checks groups. Logs kept 30 days. |
+| HTTP API + API Lambda | API Gateway HTTP API; every route needs a Cognito access token (JWT authorizer, 401 without one) except the app's public `GET /v1/crops` and `GET /v1/devices/config`; throttled to 10 requests/s (burst 20). One FastAPI Lambda (`api/`) checks groups; it runs in the Lambdas' subnet to read Postgres and signs download links for `edge/` in the models bucket. While the EC2 host is stopped it answers `503`. Logs kept 30 days. |
 | Label Studio webhook | `POST /v1/hooks/label-studio` on the same API, no token: Label Studio sends the shared secret header instead. A Lambda outside the VPC checks it, has a Lambda in the VPC store the label, and resumes the round once all k images are done. |
 
 Deploy-time settings are CDK context values (`-c key=value`):
@@ -503,6 +503,16 @@ curl -i "$API_URL/v1/me"
 Without a token the answer is `401` from API Gateway. With an access token
 from the login page (`Authorization: Bearer <token>`), `/v1/me` returns your
 `sub`, username and groups.
+
+The app's routes need no token and read Postgres, so start the host first:
+
+```bash
+curl -s "$API_URL/v1/crops"
+curl -s "$API_URL/v1/devices/config?dataset=rocole"
+```
+
+`/v1/crops` lists only datasets with a released model, so it is `{"crops": []}`
+and `/v1/devices/config` is `404` until the first model release.
 
 ## 7. Later
 

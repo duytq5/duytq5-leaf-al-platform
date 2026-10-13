@@ -115,6 +115,8 @@ LAMBDA_CIDR = "10.1.0.0/24"
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 LAMBDAS_DIR = REPO_ROOT / "lambdas"
+# GET routes of the app that need no sign-in (design doc, Edge API).
+PUBLIC_ROUTES = ("/v1/crops", "/v1/devices/config")
 # Per-client limits on the whole API (requests per second, burst).
 API_RATE_LIMIT = 10
 API_BURST_LIMIT = 20
@@ -522,6 +524,14 @@ class PlatformStack(Stack):
             self.lambda_sg, ec2.Port.tcp(LABEL_STUDIO_PORT), "Label Studio API from the Lambdas"
         )
 
+    def _postgres_environment(self) -> dict[str, str]:
+        """Settings of lambdas/postgres.py open_db() for the Lambdas in the VPC."""
+        return {
+            "PG_HOSTADDR": self.host.instance_private_ip,
+            "PG_PASSWORD": SecretValue.secrets_manager(POSTGRES_PASSWORD_SECRET).unsafe_unwrap(),
+            "PG_CA": ssm.StringParameter.value_for_string_parameter(self, SSM_POSTGRES_TLS_CA),
+        }
+
     def _al_round(self) -> None:
         al_round = AlRound(
             self,
@@ -529,13 +539,7 @@ class PlatformStack(Stack):
             vpc=self.vpc,
             subnet=self.lambda_subnet,
             security_group=self.lambda_sg,
-            environment={
-                "PG_HOSTADDR": self.host.instance_private_ip,
-                "PG_PASSWORD": SecretValue.secrets_manager(
-                    POSTGRES_PASSWORD_SECRET
-                ).unsafe_unwrap(),
-                "PG_CA": ssm.StringParameter.value_for_string_parameter(self, SSM_POSTGRES_TLS_CA),
-            },
+            environment=self._postgres_environment(),
             label_studio_environment={
                 "LS_URL": f"http://{self.host.instance_private_ip}:{LABEL_STUDIO_PORT}",
                 "LS_API_TOKEN": self._label_studio_secret("api_token"),
@@ -724,11 +728,14 @@ class PlatformStack(Stack):
     def _api(self) -> None:
         """HTTP API in front of one FastAPI Lambda.
 
-        Every route needs a Cognito access token from the `mobile` or
-        `admin-web` client: the JWT authorizer checks signature, issuer,
-        client id and expiry and answers 401 itself. The Lambda then checks
-        groups (`api.auth.require_groups`). Public routes (`/v1/crops`,
-        `/v1/devices/config`) will be added with no authorizer when built.
+        Routes need a Cognito access token from the `mobile` or `admin-web`
+        client: the JWT authorizer checks signature, issuer, client id and
+        expiry and answers 401 itself. The Lambda then checks groups
+        (`api.auth.require_groups`). The app's catalog (`PUBLIC_ROUTES`) needs
+        no token, so every install gets model updates; API Gateway throttles it.
+
+        The Lambda reads Postgres, so it runs in the Lambda subnet; it signs
+        S3 download links locally and needs no other AWS call.
         """
         log_group = logs.LogGroup(
             self,
@@ -744,20 +751,39 @@ class PlatformStack(Stack):
             handler="api.app.handler",
             code=lambda_code.API.code(),
             memory_size=512,
-            timeout=Duration.seconds(10),
+            # Past the 10 s Postgres connect timeout: while the host is stopped
+            # the API answers 503 instead of timing out.
+            timeout=Duration.seconds(15),
+            vpc=self.vpc,
+            vpc_subnets=ec2.SubnetSelection(subnets=[self.lambda_subnet]),
+            security_groups=[self.lambda_sg],
+            environment={
+                **self._postgres_environment(),
+                "MODELS_BUCKET": self.models_bucket.bucket_name,
+            },
             log_group=log_group,
+        )
+        # Presigned download links work only for what the signer may read.
+        fn.add_to_role_policy(
+            iam.PolicyStatement(
+                actions=["s3:GetObject"], resources=[self.models_bucket.arn_for_objects("edge/*")]
+            )
         )
         authorizer = apigw_auth.HttpUserPoolAuthorizer(
             "CognitoAuthorizer",
             self.user_pool,
             user_pool_clients=[self.mobile_client, self.admin_web_client],
         )
+        integration = apigw_int.HttpLambdaIntegration("ApiIntegration", fn)
         self.http_api = api = apigw.HttpApi(self, "Api", default_authorizer=authorizer)
-        api.add_routes(
-            path="/v1/{proxy+}",
-            methods=[apigw.HttpMethod.ANY],
-            integration=apigw_int.HttpLambdaIntegration("ApiIntegration", fn),
-        )
+        api.add_routes(path="/v1/{proxy+}", methods=[apigw.HttpMethod.ANY], integration=integration)
+        for path in PUBLIC_ROUTES:
+            api.add_routes(
+                path=path,
+                methods=[apigw.HttpMethod.GET],
+                integration=integration,
+                authorizer=apigw.HttpNoneAuthorizer(),
+            )
         stage: apigw.CfnStage = api.default_stage.node.default_child
         stage.default_route_settings = apigw.CfnStage.RouteSettingsProperty(
             throttling_rate_limit=API_RATE_LIMIT, throttling_burst_limit=API_BURST_LIMIT
