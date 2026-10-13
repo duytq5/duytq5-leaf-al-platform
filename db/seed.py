@@ -67,6 +67,7 @@ class SeedReport:
     existing_rows: int = 0
     kept_existing_split: int = 0
     initial_labeled: int = 0  # train images labeled at seeding in this run
+    conflicting_dropped: int = 0  # images left out: filed under two labels
     v0_added: int = 0
 
 
@@ -107,9 +108,14 @@ def _sha256(path: Path) -> str:
     return h.hexdigest()
 
 
-def scan(source: Path, labels: list[str]) -> list[SourceImage]:
-    """Read <source>/<class code>/*.jpg. Fails on unknown or empty label folders,
-    non-JPEG files, and the same image filed under two labels."""
+def scan(source: Path, labels: list[str], conflicting: set[str] | None = None) -> list[SourceImage]:
+    """Read <source>/<class code>/*.jpg. Fails on unknown or empty label folders
+    and non-JPEG files.
+
+    Byte-identical copies are one image (the first path in class order is
+    kept). An image filed under two different labels has no trustworthy label,
+    so every copy of it is left out; its SHA-256 goes into `conflicting`.
+    RoCoLe has 12 such pairs, which the research code drops the same way."""
     if not source.is_dir():
         raise SeedError(f"{source} is not a directory")
     folders = {p.name for p in source.iterdir() if p.is_dir() and not p.name.startswith(".")}
@@ -119,6 +125,7 @@ def scan(source: Path, labels: list[str]) -> list[SourceImage]:
         raise SeedError(f"no folder for labels: {missing}")
 
     by_sha: dict[str, SourceImage] = {}
+    dropped: set[str] = set()
     bad: list[str] = []
     for label in labels:
         for path in sorted((source / label).rglob("*")):
@@ -134,10 +141,12 @@ def scan(source: Path, labels: list[str]) -> list[SourceImage]:
             sha = _sha256(path)
             seen = by_sha.get(sha)
             if seen and seen.label != label:
-                raise SeedError(
-                    f"same image under {seen.label!r} and {label!r}: {seen.path}, {path}"
-                )
+                dropped.add(sha)
             by_sha.setdefault(sha, SourceImage(sha, label, path))
+    for sha in dropped:
+        del by_sha[sha]
+    if conflicting is not None:
+        conflicting.update(dropped)
     if bad:
         raise SeedError(f"{len(bad)} files are not JPEG, e.g. {bad[:3]}")
     if empty := [y for y in labels if not any(i.label == y for i in by_sha.values())]:
@@ -409,11 +418,15 @@ def _fill_v0(conn: psycopg.Connection, dataset: str, dataset_id: int) -> int:
     return len(missing)
 
 
-def plan(cfg: DatasetConfig, source: Path) -> tuple[list[SourceImage], dict[str, Split], set[str]]:
-    """Images, their split, and the train images labeled at seeding."""
-    images = scan(source, cfg.codes)
+def plan(
+    cfg: DatasetConfig, source: Path
+) -> tuple[list[SourceImage], dict[str, Split], set[str], int]:
+    """Images, their split, the train images labeled at seeding, and how many
+    images were left out for being filed under two labels."""
+    conflicting: set[str] = set()
+    images = scan(source, cfg.codes, conflicting)
     splits = assign_splits(images, cfg.split)
-    return images, splits, pick_initial(images, splits, cfg.split)
+    return images, splits, pick_initial(images, splits, cfg.split), len(conflicting)
 
 
 def check_crop(cfg: DatasetConfig, crops: CropsConfig) -> None:
@@ -434,8 +447,8 @@ def seed_dataset(
     Safe to re-run after a failure at any point. Crops are upserted from
     configs/crops.yaml; the dataset's crop must be one of them."""
     check_crop(cfg, crops)
-    images, splits, initial = plan(cfg, source)
-    report = SeedReport(dataset=cfg.name)
+    images, splits, initial, conflicting = plan(cfg, source)
+    report = SeedReport(dataset=cfg.name, conflicting_dropped=conflicting)
     _upload(images, cfg.name, store, report)
     _record(conn, cfg, crops, images, splits, initial, report)
     return report
