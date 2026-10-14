@@ -121,6 +121,9 @@ DOCKER_COMPOSE_VERSION = "v2.29.7"
 DOCKER_BUILDX_VERSION = "v0.17.1"
 GITHUB_REPO = "duytq5/duytq5-leaf-al-platform"
 REPO_URL = f"https://github.com/{GITHUB_REPO}.git"
+# The repo with configs/rounds/ and configs/releases/ and the workflows that
+# act on them; override with `-c opsRepo=owner/name`.
+OPS_REPO = "duytq5/duytq5-leaf-al-ops"
 GITHUB_OIDC_HOST = "token.actions.githubusercontent.com"
 GITHUB_ROLE_NAME = "leaf-al-github-actions"
 REPO_DIR = "/home/ec2-user/duytq5-leaf-al-platform"
@@ -603,12 +606,14 @@ class PlatformStack(Stack):
     def _github_actions(self) -> None:
         """The IAM role GitHub Actions assumes with its OIDC token (design doc,
         "Control through GitHub"): no AWS keys are stored in GitHub, and only
-        workflow runs on `main` of this repository get the role, so a pull
-        request (forks included) never runs with AWS access.
+        workflow runs on `main` of the ops repo (round and release files, owner
+        decision 2026-10-14) get the role, so a pull request (forks included)
+        never runs with AWS access, and nothing in this code repo does.
 
         An account has one OIDC provider per URL: pass `-c
         githubOidcProviderArn=...` to reuse one made outside this stack.
         """
+        ops_repo = self.node.try_get_context("opsRepo") or OPS_REPO
         existing = self.node.try_get_context("githubOidcProviderArn")
         if existing:
             provider_arn = existing
@@ -629,7 +634,7 @@ class PlatformStack(Stack):
                 conditions={
                     "StringEquals": {
                         f"{GITHUB_OIDC_HOST}:aud": "sts.amazonaws.com",
-                        f"{GITHUB_OIDC_HOST}:sub": f"repo:{GITHUB_REPO}:ref:refs/heads/main",
+                        f"{GITHUB_OIDC_HOST}:sub": f"repo:{ops_repo}:ref:refs/heads/main",
                     }
                 },
             ),

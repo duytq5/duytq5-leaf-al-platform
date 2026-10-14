@@ -93,11 +93,6 @@ def repo(tmp_path, monkeypatch):
     return tmp_path / "configs/releases"
 
 
-def test_check_release_accepts_the_repo_files(monkeypatch, capsys):
-    monkeypatch.chdir(ROOT)
-    assert main(["check-release"]) == 0
-
-
 def test_check_release_ok(repo, capsys):
     (repo / "durian.yaml").write_text("model: durian-fastvit\nversion: 2\n")
     assert main(["check-release"]) == 0
@@ -114,6 +109,20 @@ def test_check_release_rejects_a_bad_file(repo, capsys):
     (repo / "durian.yaml").write_text("model: durian-fastvit\nversion: -1\n")
     assert main(["check-release"]) == 1
     assert "durian.yaml" in capsys.readouterr().out
+
+
+def test_check_release_from_the_ops_repo(tmp_path, monkeypatch, capsys):
+    """The ops repo's CI runs the pinned platform's `al` on its own release
+    files, with the platform checkout's dataset configs."""
+    (tmp_path / "ops/configs/releases").mkdir(parents=True)
+    (tmp_path / "ops/configs/releases/durian.yaml").write_text("model: d\nversion: 1\n")
+    (tmp_path / "platform/configs/datasets").mkdir(parents=True)
+    monkeypatch.chdir(tmp_path / "ops")
+    args = ["check-release", "--datasets", str(tmp_path / "platform/configs/datasets")]
+    assert main(args) == 1
+    assert "no dataset durian" in capsys.readouterr().out
+    (tmp_path / "platform/configs/datasets/durian.yaml").write_text("name: durian\n")
+    assert main(args) == 0
 
 
 def test_check_release_with_no_files(repo, capsys):

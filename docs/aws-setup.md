@@ -91,7 +91,7 @@ export CDK_DEFAULT_ACCOUNT=$(aws sts get-caller-identity --query Account --outpu
 | Security group | 80 and 443 from anywhere (Label Studio through Caddy and the Cognito gate); Postgres (5432) and Label Studio's API (8080) from the Lambdas' security group only. You and the worker reach MLflow (5000) and Postgres (5432) through SSM port forwarding (section 3). |
 | Lambda subnet | Private subnet on a second address range (10.1.0.0/24), no internet route; S3 through a free gateway endpoint. |
 | `al-round` state machine + 7 Lambdas | One AL round: mark running, snapshot, train and score jobs on SQS, select, wait for labels (the round's Label Studio project, section 3b), merge; on any error the round is marked failed and its queued images go back to the pool. ARN in SSM `/leaf-al/state-machines/al-round`. Lambda logs kept 30 days. |
-| GitHub Actions role | OIDC provider for `token.actions.githubusercontent.com` and role `leaf-al-github-actions`, assumable only by workflow runs on `main` of this repo. It may start and watch `model-release` executions and read its ARN from SSM (section 7). |
+| GitHub Actions role | OIDC provider for `token.actions.githubusercontent.com` and role `leaf-al-github-actions`, assumable only by workflow runs on `main` of the ops repo. It may start and watch `model-release` executions and read its ARN from SSM (section 7). |
 | `model-release` state machine + 2 Lambdas | Releases a model version (F5): prepare the export job, wait up to 6 hours for the worker to export ONNX into `edge/` in the models bucket, then record it in `model_releases` (`promote`, or `rollback` for a version released before). ARN in SSM `/leaf-al/state-machines/model-release`. The worker may read and write `edge/` for this. |
 | SSM parameters | `/leaf-al/buckets/data`, `/leaf-al/buckets/models`, `/leaf-al/queues/jobs-url`, and for Label Studio `/leaf-al/auth/user-pool-id`, `/leaf-al/label-studio/domain`, `/leaf-al/label-studio/client-id`. |
 | AWS Budget | Monthly cost budget, email at 80 % actual and 100 % forecast. Only created when `budgetEmail` is set. |
@@ -535,20 +535,24 @@ DLQ_URL=$(aws cloudformation describe-stacks --stack-name LeafAlPlatform --query
 aws sqs start-message-move-task --source-arn $(aws sqs get-queue-attributes --queue-url "$DLQ_URL" --attribute-names QueueArn --query Attributes.QueueArn --output text)
 ```
 
-## 7. GitHub Actions
+## 7. GitHub Actions (the ops repo)
 
-Workflows on `main` reach AWS with GitHub's OIDC token and the IAM role
-`leaf-al-github-actions`; no AWS keys are stored in GitHub. Only runs on
-`main` of this repository may assume the role, so pull requests never get AWS
-access. After the deploy that adds the role, store its ARN as a repository
-variable (not a secret; it names the role, it grants nothing):
+Rounds and releases are run from a separate repo, the ops repo
+(`duytq5/duytq5-leaf-al-ops` unless you deploy with `-c opsRepo=owner/name`).
+It holds `configs/rounds/`, `configs/releases/` and the workflows that act on
+them; this repo holds the code. The ops repo's workflows reach AWS with
+GitHub's OIDC token and the IAM role `leaf-al-github-actions`; no AWS keys are
+stored in GitHub. Only runs on `main` of the ops repo may assume the role, so
+pull requests never get AWS access, and nothing in this repo does. After the
+deploy that adds the role, store its ARN as a variable of the ops repo (not a
+secret; it names the role, it grants nothing):
 
 ```bash
 ROLE_ARN=$(aws cloudformation describe-stacks --stack-name LeafAlPlatform --query "Stacks[0].Outputs[?OutputKey=='GithubActionsRoleArn'].OutputValue" --output text)
-gh variable set AWS_ROLE_ARN --repo duytq5/duytq5-leaf-al-platform --body "$ROLE_ARN"
+gh variable set AWS_ROLE_ARN --repo duytq5/duytq5-leaf-al-ops --body "$ROLE_ARN"
 ```
 
-(or GitHub, Settings, Secrets and variables, Actions, Variables tab.)
+(or the ops repo on GitHub, Settings, Secrets and variables, Actions, Variables tab.)
 
 If `cdk deploy` fails with `EntityAlreadyExists` on the OIDC provider, the
 account already has one for GitHub; reuse it:
@@ -557,13 +561,7 @@ account already has one for GitHub; reuse it:
 cdk deploy -c githubOidcProviderArn=arn:aws:iam::<account>:oidc-provider/token.actions.githubusercontent.com
 ```
 
-### Release or roll back a model
-
-Edit `configs/releases/<dataset>.yaml` (`model`, `version`) in a PR; when it
-merges, the `release` workflow starts the `model-release` state machine and
-waits for it. Turn the worker on first: it exports the model. To roll back,
-revert the release commit. The run's summary lists each execution and its
-result; the app gets the new version on its next `GET /v1/devices/config`.
+How to release, roll back and start rounds is in the ops repo's README.
 
 ## 8. Later
 

@@ -42,7 +42,8 @@ def cmd_check_round(args: argparse.Namespace) -> int:
 
 
 def cmd_check_release(args: argparse.Namespace) -> int:
-    """Validate every configs/releases/{dataset}.yaml (run from the repo root)."""
+    """Validate every configs/releases/{dataset}.yaml (run from the ops repo
+    root; --datasets points at the platform checkout's dataset configs)."""
     paths = sorted(RELEASES_DIR.glob("*.yaml"))
     if not paths:
         print(f"no release files in {RELEASES_DIR}")
@@ -55,7 +56,7 @@ def cmd_check_release(args: argparse.Namespace) -> int:
             print(f"{path}: {e}")
             failed = True
             continue
-        dataset = Path("configs/datasets") / f"{name}.yaml"
+        dataset = Path(args.datasets) / f"{name}.yaml"
         if not dataset.is_file():
             print(f"{path}: no dataset {name} ({dataset} does not exist)")
             failed = True
@@ -154,7 +155,10 @@ def main(argv: list[str] | None = None) -> int:
     sub.add_parser("strategies", help="list strategies, required inputs and parameters")
     check = sub.add_parser("check-round", help="validate a round config YAML")
     check.add_argument("config")
-    sub.add_parser("check-release", help="validate configs/releases/*.yaml")
+    check_release = sub.add_parser("check-release", help="validate configs/releases/*.yaml")
+    check_release.add_argument(
+        "--datasets", default="configs/datasets", help="folder of dataset configs"
+    )
     release_input = sub.add_parser(
         "release-input", help="print the model-release input for a release file"
     )

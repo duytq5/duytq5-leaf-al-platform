@@ -462,7 +462,7 @@ def test_github_oidc_provider(full):
     assert provider["Properties"]["ClientIdList"] == ["sts.amazonaws.com"]
 
 
-def test_only_main_of_this_repo_may_assume_the_github_role(full):
+def test_only_main_of_the_ops_repo_may_assume_the_github_role(full):
     role = _github_role(full)
     assert role["RoleName"] == "leaf-al-github-actions"
     (stmt,) = role["AssumeRolePolicyDocument"]["Statement"]
@@ -470,9 +470,10 @@ def test_only_main_of_this_repo_may_assume_the_github_role(full):
     assert stmt["Condition"] == {
         "StringEquals": {
             "token.actions.githubusercontent.com:aud": "sts.amazonaws.com",
-            # Not pull requests, other branches or forks: only what merged to main.
+            # Not pull requests, other branches or forks: only what merged to
+            # main of the ops repo, which holds the round and release files.
             "token.actions.githubusercontent.com:sub": (
-                "repo:duytq5/duytq5-leaf-al-platform:ref:refs/heads/main"
+                "repo:duytq5/duytq5-leaf-al-ops:ref:refs/heads/main"
             ),
         }
     }
@@ -488,6 +489,14 @@ def test_github_role_may_only_run_releases(full):
     assert ":execution:model-release:*" in actions["states:DescribeExecution"]
     assert "/leaf-al/state-machines/model-release" in actions["ssm:GetParameter"]
     assert "GithubActionsRoleArn" in full.to_json()["Outputs"]
+
+
+def test_the_ops_repo_is_a_setting():
+    (stmt,) = _github_role(_template(opsRepo="someone/ops"))["AssumeRolePolicyDocument"][
+        "Statement"
+    ]
+    sub = stmt["Condition"]["StringEquals"]["token.actions.githubusercontent.com:sub"]
+    assert sub == "repo:someone/ops:ref:refs/heads/main"
 
 
 def test_an_existing_github_oidc_provider_is_reused():

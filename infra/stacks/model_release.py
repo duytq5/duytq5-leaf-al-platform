@@ -3,8 +3,8 @@
   Prepare -> Export (SQS job, the worker) -> Record -> done
   any error -> ReleaseFailed (nothing to undo: only Record writes, in one transaction)
 
-Execution input: common.release.ReleaseExecution, set by the `release`
-workflow when a change to configs/releases/{dataset}.yaml merges. The export
+Execution input: common.release.ReleaseExecution, set by the ops repo's
+`release` workflow when a change to configs/releases/{dataset}.yaml merges. The export
 job runs in the worker image of the commit that trained the model (Prepare
 finds it), so it uses the recipe code the model was trained with.
 
