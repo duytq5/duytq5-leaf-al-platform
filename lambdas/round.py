@@ -2,12 +2,14 @@
 
   mark_running  pending -> running; returns the round settings
   snapshot      writes the version manifest and the pool list, builds the
-                train and score job specs
+                train and score job specs (no train job for a selection-only
+                round, design doc change 24: it scores with the round's model)
   (train, score: SQS jobs the worker runs; Step Functions waits for them)
   select        runs the round's strategy on the scores, marks k images queued
   (await labels: lambdas/labeling.py puts the selected images into Label
                 Studio; its webhook resumes the round once all k are labeled, F2)
-  merge         new dataset version, model_versions row, round succeeded
+  merge         new dataset version, model_versions row (if the round
+                trained), round succeeded
   fail          round failed, its queued images back to unlabeled
 
 Step Functions retries a step after a timeout or a crash, so every step is
@@ -138,8 +140,57 @@ def mark_running(conn: psycopg.Connection, round_id: UUID) -> dict[str, Any]:
 def snapshot(conn: psycopg.Connection, store: S3Store, run: RoundExecution) -> dict[str, Any]:
     """Write what the worker reads: the base version's labeled images (all
     splits; the worker trains on train, picks the checkpoint on val and reports
-    test) and the unlabeled pool. Returns the specs of the train and score jobs."""
+    test) and the unlabeled pool. Returns the specs of the train and score jobs.
+    A selection-only round gets no manifest and no train job; its score job
+    uses the round's model."""
     rnd = _running(conn, run.round_id)
+    out: dict[str, Any] = {}
+    if run.train is not None:
+        out["train"] = _train_job(conn, store, run, rnd)
+
+    pool = conn.execute(
+        """
+        SELECT id, sha256 FROM images
+        WHERE dataset_id = %s AND split = 'train' AND status = 'unlabeled'
+        ORDER BY id
+        """,
+        (rnd.dataset_id,),
+    ).fetchall()
+    if not pool:
+        raise RoundError(f"dataset {rnd.dataset} has no unlabeled images to select from")
+    pool_key = pool_manifest_key(run.round_id)
+    store.put(
+        pool_key,
+        _parquet(
+            pa.table(
+                {
+                    "image_id": [r[0] for r in pool],
+                    "sha256": [r[1] for r in pool],
+                    "key": [raw_key(rnd.dataset, r[1]) for r in pool],
+                }
+            )
+        ),
+    )
+
+    strategy = get_strategy(rnd.strategy, seed=rnd.seed, params=rnd.strategy_cfg)
+    out["score"] = {
+        "job_id": str(job_uuid(run.round_id, JobType.SCORE)),
+        "pool_manifest_uri": store.uri(pool_key),
+        "outputs": sorted(strategy.requires | {"probs"}),
+        "output_uri": store.uri(scores_key(run.round_id)),
+    }
+    # A round that trains scores with the model the train job returns; the
+    # state machine passes it on.
+    if run.model is not None:
+        out["score"]["model_uri"] = run.model
+    out["pool_size"] = len(pool)
+    return out
+
+
+def _train_job(
+    conn: psycopg.Connection, store: S3Store, run: RoundExecution, rnd: Round
+) -> dict[str, Any]:
+    """The base version's manifest and the train job's spec."""
     labeled = conn.execute(
         """
         SELECT i.id, i.sha256, i.split, c.code
@@ -173,52 +224,15 @@ def snapshot(conn: psycopg.Connection, store: S3Store, run: RoundExecution) -> d
         "UPDATE dataset_versions SET manifest_uri = %s WHERE id = %s AND manifest_uri IS NULL",
         (store.uri(manifest), rnd.base_version_id),
     )
-
-    pool = conn.execute(
-        """
-        SELECT id, sha256 FROM images
-        WHERE dataset_id = %s AND split = 'train' AND status = 'unlabeled'
-        ORDER BY id
-        """,
-        (rnd.dataset_id,),
-    ).fetchall()
-    if not pool:
-        raise RoundError(f"dataset {rnd.dataset} has no unlabeled images to select from")
-    pool_key = pool_manifest_key(run.round_id)
-    store.put(
-        pool_key,
-        _parquet(
-            pa.table(
-                {
-                    "image_id": [r[0] for r in pool],
-                    "sha256": [r[1] for r in pool],
-                    "key": [raw_key(rnd.dataset, r[1]) for r in pool],
-                }
-            )
-        ),
-    )
-
     train = TrainSpec(
         **run.train.model_dump(),
         dataset=rnd.dataset,
         manifest_uri=store.uri(manifest),
         classes=_classes(conn, rnd.dataset_id),
     )
-    strategy = get_strategy(rnd.strategy, seed=rnd.seed, params=rnd.strategy_cfg)
-    # The score spec's model_uri comes from the train job's result; the state
-    # machine adds it.
     return {
-        "train": {
-            "job_id": str(job_uuid(run.round_id, JobType.TRAIN)),
-            "spec": train.model_dump(mode="json"),
-        },
-        "score": {
-            "job_id": str(job_uuid(run.round_id, JobType.SCORE)),
-            "pool_manifest_uri": store.uri(pool_key),
-            "outputs": sorted(strategy.requires | {"probs"}),
-            "output_uri": store.uri(scores_key(run.round_id)),
-        },
-        "pool_size": len(pool),
+        "job_id": str(job_uuid(run.round_id, JobType.TRAIN)),
+        "spec": train.model_dump(mode="json"),
     }
 
 
@@ -273,10 +287,13 @@ def merge(
     conn: psycopg.Connection,
     store: Store,
     run: RoundExecution,
-    result: TrainResult,
+    result: TrainResult | None,
 ) -> dict[str, Any]:
     """Make the round's dataset version (its base plus this round's labels),
-    record the model it trained, and finish the round, in one transaction."""
+    record the model it trained (a selection-only round has none), and finish
+    the round, in one transaction."""
+    if run.train is not None and result is None:
+        raise RoundError(f"round {run.round_id} trains but has no train result")
     ids = _selection(store, run.round_id) or []
     with conn.transaction():
         rnd = load_round(conn, run.round_id, lock=True)
@@ -317,28 +334,29 @@ def merge(
             """,
             (run.round_id, ids),
         )
-        conn.execute(
-            """
-            INSERT INTO model_versions (round_id, trained_on_version_id, mlflow_name,
-                mlflow_version, mlflow_run_id, arch, train_config, labels, metrics)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
-            """,
-            (
-                run.round_id,
-                rnd.base_version_id,
-                result.mlflow_name,
-                result.mlflow_version,
-                result.mlflow_run_id,
-                result.arch,
-                Jsonb(run.train.model_dump(mode="json")),
-                Jsonb(_classes(conn, rnd.dataset_id)),
-                Jsonb(result.metrics),
-            ),
-        )
+        if run.train is not None:
+            conn.execute(
+                """
+                INSERT INTO model_versions (round_id, trained_on_version_id, mlflow_name,
+                    mlflow_version, mlflow_run_id, arch, train_config, labels, metrics)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                """,
+                (
+                    run.round_id,
+                    rnd.base_version_id,
+                    result.mlflow_name,
+                    result.mlflow_version,
+                    result.mlflow_run_id,
+                    result.arch,
+                    Jsonb(run.train.model_dump(mode="json")),
+                    Jsonb(_classes(conn, rnd.dataset_id)),
+                    Jsonb(result.metrics),
+                ),
+            )
         conn.execute(
             "UPDATE rounds SET status = 'succeeded', metrics = %s, finished_at = now(),"
             " label_task_token = NULL WHERE id = %s",
-            (Jsonb(result.metrics), run.round_id),
+            (None if result is None else Jsonb(result.metrics), run.round_id),
         )
     return _merged(conn, run.round_id)
 
@@ -385,8 +403,16 @@ class _Event(BaseModel):
     round_id: UUID
 
 
-class _MergeEvent(RoundExecution):
-    train_result: TrainResult
+class _MergeEvent(BaseModel):
+    """The Merge state's whole input: the execution input plus each step's
+    result; train_result only when the round trained."""
+
+    model_config = ConfigDict(extra="ignore")
+    round_id: UUID
+    image: str
+    train: dict[str, Any] | None = None
+    model: str | None = None
+    train_result: TrainResult | None = None
 
 
 def _store() -> S3Store:
@@ -415,7 +441,7 @@ def select_handler(event: dict, _context) -> dict:
 @traced
 def merge_handler(event: dict, _context) -> dict:
     ev = _MergeEvent.model_validate(event)
-    run = RoundExecution(round_id=ev.round_id, image=ev.image, train=ev.train)
+    run = RoundExecution(round_id=ev.round_id, image=ev.image, train=ev.train, model=ev.model)
     with open_db() as conn:
         return merge(conn, _store(), run, ev.train_result)
 

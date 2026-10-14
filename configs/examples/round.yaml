@@ -4,6 +4,9 @@
 # Check this file:  uv run al check-round configs/examples/round.yaml
 dataset: rocole
 # base_version: 0  # dataset version to train on; default: the latest
+# Leave `train` out for a selection-only round: it scores the pool with an
+# existing model and trains nothing (training runs later on its own).
+# model: models:/rocole-fastvit@champion  # only without train; default: newest model
 train:
   recipe: timm_classifier
   params: {epochs: 20}

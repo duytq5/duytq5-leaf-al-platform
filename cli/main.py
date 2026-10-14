@@ -30,7 +30,7 @@ def cmd_check_round(args: argparse.Namespace) -> int:
     checkout's dataset configs)."""
     try:
         cfg = RoundConfig.from_yaml(args.config)
-        recipe = get_recipe(cfg.train.recipe, cfg.train.params)
+        recipe = None if cfg.train is None else get_recipe(cfg.train.recipe, cfg.train.params)
         strategy = from_config(cfg.selection)
     except KeyError as e:
         print(e.args[0])
@@ -43,10 +43,15 @@ def cmd_check_round(args: argparse.Namespace) -> int:
         print(f"no dataset {cfg.dataset} ({dataset} does not exist)")
         return 1
     version = "latest version" if cfg.base_version is None else f"v{cfg.base_version}"
+    if recipe is None:
+        training = f"no training, scores with {cfg.model or 'the newest model'}"
+    else:
+        training = (
+            f"recipe={recipe.name} params={recipe.params.model_dump()}"
+            f" base_model={cfg.train.base_model or 'none'}"
+        )
     print(
-        f"ok: round on {cfg.dataset} {version}"
-        f", recipe={recipe.name} params={recipe.params.model_dump()}"
-        f" base_model={cfg.train.base_model or 'none'}"
+        f"ok: round on {cfg.dataset} {version}, {training}"
         f", strategy={cfg.selection.strategy} params={strategy.params.model_dump()}"
         f" k={cfg.selection.k} needs={sorted(strategy.requires) or 'nothing'}"
     )

@@ -58,7 +58,7 @@ def round_uuid(commit_sha: str, config_path: str) -> UUID:
 def _validate(ev: StartRound):
     try:
         cfg = RoundConfig.model_validate(ev.config)
-        recipe = get_recipe(cfg.train.recipe, cfg.train.params)
+        recipe = None if cfg.train is None else get_recipe(cfg.train.recipe, cfg.train.params)
         strategy = from_config(cfg.selection)
     except KeyError as e:
         raise BadRound(e.args[0]) from None
@@ -67,23 +67,42 @@ def _validate(ev: StartRound):
     return cfg, recipe, strategy
 
 
+def _newest_model(conn: psycopg.Connection, dataset_id: int) -> str | None:
+    row = conn.execute(
+        """
+        SELECT mv.mlflow_name, mv.mlflow_version FROM model_versions mv
+          JOIN rounds r ON r.id = mv.round_id
+         WHERE r.dataset_id = %s ORDER BY mv.created_at DESC, mv.id DESC LIMIT 1
+        """,
+        (dataset_id,),
+    ).fetchone()
+    return None if row is None else f"models:/{row[0]}/{row[1]}"
+
+
 def start_round(conn: psycopg.Connection, ev: StartRound) -> dict[str, Any]:
     cfg, recipe, strategy = _validate(ev)
     round_id = round_uuid(ev.commit_sha, ev.config_path)
-    execution = RoundExecution(
-        round_id=round_id,
-        image=ev.image,
-        train=TrainSection(
-            recipe=recipe.name,
-            params=recipe.params.model_dump(mode="json"),
-            base_model=cfg.train.base_model,
-        ),
-    )
-    out = {"round_id": str(round_id), "execution": execution.model_dump(mode="json")}
 
     dataset = conn.execute("SELECT id FROM datasets WHERE name = %s", (cfg.dataset,)).fetchone()
     if dataset is None:
         raise BadRound(f"no dataset {cfg.dataset}")
+    train, score_model = None, None
+    if recipe is not None:
+        train = TrainSection(
+            recipe=recipe.name,
+            params=recipe.params.model_dump(mode="json"),
+            base_model=cfg.train.base_model,
+        )
+    else:
+        # A selection-only round (change 24) scores with an existing model.
+        score_model = cfg.model or _newest_model(conn, dataset[0])
+        if score_model is None:
+            raise BadRound(
+                f"{cfg.dataset} has no model to score with; add `train` or run a training first"
+            )
+    execution = RoundExecution(round_id=round_id, image=ev.image, train=train, model=score_model)
+    out = {"round_id": str(round_id), "execution": execution.model_dump(mode="json")}
+
     if cfg.base_version is None:
         version = conn.execute(
             "SELECT id FROM dataset_versions WHERE dataset_id = %s ORDER BY version DESC LIMIT 1",
@@ -101,7 +120,8 @@ def start_round(conn: psycopg.Connection, ev: StartRound) -> dict[str, Any]:
         with conn.transaction():
             conn.execute(
                 "INSERT INTO rounds (id, dataset_id, base_version_id, strategy, strategy_cfg,"
-                " k, seed, started_by, commit_sha) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)"
+                " k, seed, started_by, commit_sha, score_model)"
+                " VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)"
                 " ON CONFLICT (id) DO NOTHING",
                 (
                     round_id,
@@ -113,6 +133,7 @@ def start_round(conn: psycopg.Connection, ev: StartRound) -> dict[str, Any]:
                     cfg.selection.seed,
                     ev.started_by,
                     ev.commit_sha,
+                    score_model,
                 ),
             )
     except psycopg.errors.UniqueViolation:

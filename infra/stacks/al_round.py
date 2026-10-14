@@ -4,12 +4,15 @@
   -> AwaitLabels -> Merge -> done
   any error -> Fail (round failed, queued images back to the pool)
 
+A selection-only round (execution input `train` is null, design doc change 24)
+skips Train and scores with the round's own `model`.
+
 AwaitLabels (lambdas/labeling.py) puts the selected images into the round's
 Label Studio project and waits; RecordLabelFn stores each submitted label for
 the webhook Lambda outside the VPC (infra/stacks/platform.py), which resumes
 the round once all k images are done.
 
-Execution input: {round_id, image, train} (common.round.RoundExecution); the
+Execution input: {round_id, image, train, model} (common.round.RoundExecution); the
 start-round Lambda sets it. The execution name is the round id.
 
 Train and score wait for the worker with a task token and no heartbeat
@@ -134,6 +137,7 @@ class AlRound(Construct):
             **round_id,
             "image": sfn.JsonPath.string_at("$.image"),
             "train": sfn.JsonPath.object_at("$.train"),
+            "model": sfn.JsonPath.string_at("$.model"),
         }
 
         def job(name: str, job_type: str, job_id: str, spec: dict, result_path: str):
@@ -156,49 +160,73 @@ class AlRound(Construct):
                 result_path=result_path,
             )
 
-        steps = [
-            invoke("MarkRunning", mark_running, round_id, "$.round"),
-            invoke("Snapshot", snapshot, execution, "$.snapshot"),
-            job(
-                "Train",
-                "train",
-                "$.snapshot.train.job_id",
-                sfn.JsonPath.object_at("$.snapshot.train.spec"),
-                "$.train_result",
-            ),
-            job(
-                "Score",
-                "score",
-                "$.snapshot.score.job_id",
-                {
-                    "model_uri": sfn.JsonPath.string_at("$.train_result.model_uri"),
-                    "pool_manifest_uri": sfn.JsonPath.string_at(
-                        "$.snapshot.score.pool_manifest_uri"
-                    ),
-                    "outputs": sfn.JsonPath.list_at("$.snapshot.score.outputs"),
-                    "output_uri": sfn.JsonPath.string_at("$.snapshot.score.output_uri"),
-                },
-                "$.score_result",
-            ),
-            invoke("Select", select, round_id, "$.select"),
-            self._await_labels(await_labels, round_id),
-            invoke(
-                "Merge",
-                merge,
-                {**execution, "train_result": sfn.JsonPath.object_at("$.train_result")},
-                "$.merge",
-            ),
-        ]
+        mark = invoke("MarkRunning", mark_running, round_id, "$.round")
+        snap = invoke("Snapshot", snapshot, execution, "$.snapshot")
+        train = job(
+            "Train",
+            "train",
+            "$.snapshot.train.job_id",
+            sfn.JsonPath.object_at("$.snapshot.train.spec"),
+            "$.train_result",
+        )
+        score = job(
+            "Score",
+            "score",
+            "$.snapshot.score.job_id",
+            {
+                "model_uri": sfn.JsonPath.string_at("$.scoring.model_uri"),
+                "pool_manifest_uri": sfn.JsonPath.string_at("$.snapshot.score.pool_manifest_uri"),
+                "outputs": sfn.JsonPath.list_at("$.snapshot.score.outputs"),
+                "output_uri": sfn.JsonPath.string_at("$.snapshot.score.output_uri"),
+            },
+            "$.score_result",
+        )
+        select_ = invoke("Select", select, round_id, "$.select")
+        labels = self._await_labels(await_labels, round_id)
+        # No payload: the Lambda gets the whole state, since train_result
+        # exists only when Train ran.
+        merge_ = tasks.LambdaInvoke(
+            self,
+            "Merge",
+            lambda_function=merge,
+            payload_response_only=True,
+            result_path="$.merge",
+        )
+        merge_.add_retry(
+            errors=TRANSIENT_ERRORS, interval=Duration.seconds(10), max_attempts=3, backoff_rate=2
+        )
+
+        def scoring_model(name: str, path: str) -> sfn.Pass:
+            return sfn.Pass(
+                self,
+                name,
+                parameters={"model_uri": sfn.JsonPath.string_at(path)},
+                result_path="$.scoring",
+            )
 
         failed = invoke("MarkFailed", fail, round_id, sfn.JsonPath.DISCARD).next(
             sfn.Fail(self, "RoundFailed", cause="see the failed step in the execution history")
         )
-        chain = sfn.Chain.start(steps[0])
-        for s in steps:
+        for s in (mark, snap, train, score, select_, labels, merge_):
             s.add_catch(failed, result_path="$.error")
-            if s is not steps[0]:
-                chain = chain.next(s)
-        chain = chain.next(sfn.Succeed(self, "RoundSucceeded"))
+
+        score.next(select_).next(labels).next(merge_).next(sfn.Succeed(self, "RoundSucceeded"))
+        chain = (
+            sfn.Chain.start(mark)
+            .next(snap)
+            .next(
+                sfn.Choice(self, "TrainOrNot")
+                .when(
+                    sfn.Condition.is_null("$.train"),
+                    scoring_model("UseRoundModel", "$.snapshot.score.model_uri").next(score),
+                )
+                .otherwise(
+                    train.next(scoring_model("UseTrainedModel", "$.train_result.model_uri")).next(
+                        score
+                    )
+                )
+            )
+        )
 
         self.state_machine = sfn.StateMachine(
             self,

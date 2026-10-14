@@ -112,6 +112,64 @@ def test_base_version_defaults_to_the_latest(env):
     assert version == 1
 
 
+SELECTION_ONLY = {k: v for k, v in CONFIG.items() if k != "train"}
+
+
+def _model(conn, version: int) -> None:
+    """A model trained by an earlier (succeeded) round on toy."""
+    rid = uuid.uuid4()
+    conn.execute(
+        "INSERT INTO rounds (id, dataset_id, base_version_id, strategy, k, seed, status,"
+        " started_by, commit_sha) SELECT %s, dataset_id, id, 'random', 1, 1, 'succeeded',"
+        " 'x', %s FROM dataset_versions WHERE version = 0",
+        (rid, COMMIT),
+    )
+    conn.execute(
+        "INSERT INTO model_versions (round_id, trained_on_version_id, mlflow_name,"
+        " mlflow_version, mlflow_run_id, arch, train_config, labels)"
+        " SELECT %s, id, 'toy', %s, 'run', 'fastvit_t8', '{}',"
+        ' \'[{"code": "a"}, {"code": "b"}]\' FROM dataset_versions WHERE version = 0',
+        (rid, version),
+    )
+
+
+def _score_model(conn, out) -> str | None:
+    return conn.execute(
+        "SELECT score_model FROM rounds WHERE id = %s", (uuid.UUID(out["round_id"]),)
+    ).fetchone()[0]
+
+
+def test_a_round_that_trains_scores_with_its_own_model(env):
+    conn, _ = env
+    out = _start(conn)
+    assert out["execution"]["model"] is None
+    assert _score_model(conn, out) is None
+
+
+def test_a_selection_only_round_scores_with_the_given_model(env):
+    conn, _ = env
+    out = _start(conn, config={**SELECTION_ONLY, "model": "models:/toy@champion"})
+    execution = RoundExecution.model_validate(out["execution"])
+    assert execution.train is None and execution.model == "models:/toy@champion"
+    assert _score_model(conn, out) == "models:/toy@champion"
+
+
+def test_a_selection_only_round_defaults_to_the_newest_model(env):
+    conn, _ = env
+    _model(conn, 1)
+    _model(conn, 2)
+    out = _start(conn, config=SELECTION_ONLY)
+    assert out["execution"]["model"] == "models:/toy/2"
+    assert _score_model(conn, out) == "models:/toy/2"
+
+
+def test_a_selection_only_round_needs_a_model(env):
+    conn, _ = env
+    with pytest.raises(control.BadRound, match="no model"):
+        _start(conn, config=SELECTION_ONLY)
+    assert conn.execute("SELECT count(*) FROM rounds").fetchone()[0] == 0
+
+
 @pytest.mark.parametrize(
     ("config", "message"),
     [

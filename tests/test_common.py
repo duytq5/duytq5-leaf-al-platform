@@ -18,6 +18,7 @@ from common import (
     parse_job,
     s3keys,
 )
+from common.round import RoundExecution
 
 ROOT = Path(__file__).resolve().parents[1]
 SHA = "a" * 64
@@ -59,6 +60,42 @@ def test_base_model_names_a_registered_model(base_model):
     cfg = _round_dict()
     cfg["train"]["base_model"] = base_model
     assert RoundConfig.model_validate(cfg).train.base_model == base_model
+
+
+def _selection_only(**extra) -> dict:
+    cfg = _round_dict()
+    del cfg["train"]
+    return {**cfg, **extra}
+
+
+def test_a_round_without_train_only_selects():
+    """Change 24: a selection-only round scores with an existing model."""
+    cfg = RoundConfig.model_validate(_selection_only())
+    assert cfg.train is None and cfg.model is None  # the dataset's newest model
+    cfg = RoundConfig.model_validate(_selection_only(model="models:/rocole-fastvit@champion"))
+    assert cfg.model == "models:/rocole-fastvit@champion"
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [
+        {**_round_dict(), "model": "models:/rocole-fastvit/2"},  # a round that trains scores
+        _selection_only(model="s3://bucket/model.pt"),  # with its own model
+    ],
+)
+def test_round_model_rules(bad):
+    with pytest.raises(ValidationError):
+        RoundConfig.model_validate(bad)
+
+
+def test_round_execution_has_a_train_section_or_a_model():
+    run = {"round_id": str(uuid4()), "image": IMAGE}
+    train = {"recipe": "timm_classifier"}
+    assert RoundExecution.model_validate({**run, "train": train}).model is None
+    assert RoundExecution.model_validate({**run, "model": "models:/x/1"}).train is None
+    for bad in ({**run}, {**run, "train": train, "model": "models:/x/1"}):
+        with pytest.raises(ValidationError):
+            RoundExecution.model_validate(bad)
 
 
 IMAGE = "ghcr.io/duytq5/duytq5-leaf-al-platform-worker:" + "b" * 40
