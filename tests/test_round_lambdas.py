@@ -286,7 +286,7 @@ def test_select_skips_images_that_left_the_pool(env):
 
 def test_select_needs_the_scores(env):
     conn, store = env
-    rid = _round(conn)
+    rid = _round(conn, strategy="entropy")
     steps.mark_running(conn, rid)
     with pytest.raises(steps.RoundError, match="no scores"):
         steps.select(conn, store, rid)
@@ -334,6 +334,35 @@ def test_a_round_that_trains_needs_the_train_result(env):
     with pytest.raises(steps.RoundError, match="no train result"):
         steps.merge(conn, store, _run(rid), None)
     assert _status(conn, rid) == "running"
+
+
+def test_a_random_round_without_a_model_selects_from_the_pool_list(env):
+    """No train, no model: no score job; select picks k at random from the
+    pool list the snapshot wrote, then labeling and merge run as usual."""
+    conn, store = env
+    rid = _round(conn)  # random
+    run = RoundExecution(round_id=rid, image=IMAGE)
+    steps.mark_running(conn, rid)
+    out = steps.snapshot(conn, store, run)
+    assert "train" not in out and "score" not in out
+    assert out["pool_size"] > 3
+    assert scores_key(rid) not in store.objects
+    assert steps.select(conn, store, rid) == {"selected": 3}
+    chosen = json.loads(store.objects[selection_key(rid)])["image_ids"]
+    pool = _table(store, pool_manifest_key(rid)).column("image_id").to_pylist()
+    assert set(chosen) <= set(pool)
+    assert steps.select(conn, store, rid) == {"selected": 3}  # a retry keeps the set
+    for i in chosen:
+        _label(conn, i, "a", rid)
+    assert steps.merge(conn, store, run, None)["version"] == 1
+
+
+def test_a_random_round_needs_its_pool_list(env):
+    conn, store = env
+    rid = _round(conn)
+    steps.mark_running(conn, rid)
+    with pytest.raises(steps.RoundError, match="no pool list"):
+        steps.select(conn, store, rid)
 
 
 def test_merge_handler_reads_the_whole_execution_state(env, monkeypatch):

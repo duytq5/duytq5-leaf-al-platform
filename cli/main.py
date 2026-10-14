@@ -43,7 +43,9 @@ def cmd_check_round(args: argparse.Namespace) -> int:
         print(f"no dataset {cfg.dataset} ({dataset} does not exist)")
         return 1
     version = "latest version" if cfg.base_version is None else f"v{cfg.base_version}"
-    if recipe is None:
+    if recipe is None and cfg.model is None and not strategy.requires:
+        training = "no training, no scoring (the strategy needs no model)"
+    elif recipe is None:
         training = f"no training, scores with {cfg.model or 'the newest model'}"
     else:
         training = (

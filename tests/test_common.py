@@ -88,12 +88,14 @@ def test_round_model_rules(bad):
         RoundConfig.model_validate(bad)
 
 
-def test_round_execution_has_a_train_section_or_a_model():
+def test_round_execution_has_a_train_section_a_model_or_neither():
     run = {"round_id": str(uuid4()), "image": IMAGE}
     train = {"recipe": "timm_classifier"}
     assert RoundExecution.model_validate({**run, "train": train}).model is None
     assert RoundExecution.model_validate({**run, "model": "models:/x/1"}).train is None
-    for bad in ({**run}, {**run, "train": train, "model": "models:/x/1"}):
+    # Neither: a random round that needs no scores (no model, no worker).
+    assert RoundExecution.model_validate(run).model is None
+    for bad in ({**run, "train": train, "model": "models:/x/1"},):
         with pytest.raises(ValidationError):
             RoundExecution.model_validate(bad)
 

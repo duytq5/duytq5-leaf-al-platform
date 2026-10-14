@@ -5,7 +5,8 @@
   any error -> Fail (round failed, queued images back to the pool)
 
 A selection-only round (execution input `train` is null, design doc change 24)
-skips Train and scores with the round's own `model`.
+skips Train and scores with the round's own `model`; a random round with no
+model (`model` null too) skips Score as well and selects from the pool list.
 
 AwaitLabels (lambdas/labeling.py) puts the selected images into the round's
 Label Studio project and waits; RecordLabelFn stores each submitted label for
@@ -218,7 +219,12 @@ class AlRound(Construct):
                 sfn.Choice(self, "TrainOrNot")
                 .when(
                     sfn.Condition.is_null("$.train"),
-                    scoring_model("UseRoundModel", "$.snapshot.score.model_uri").next(score),
+                    # A random round with no model needs no scores: no worker.
+                    sfn.Choice(self, "ScoreOrNot")
+                    .when(sfn.Condition.is_null("$.model"), select_)
+                    .otherwise(
+                        scoring_model("UseRoundModel", "$.snapshot.score.model_uri").next(score)
+                    ),
                 )
                 .otherwise(
                     train.next(scoring_model("UseTrainedModel", "$.train_result.model_uri")).next(

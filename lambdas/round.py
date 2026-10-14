@@ -5,7 +5,8 @@
                 train and score job specs (no train job for a selection-only
                 round, design doc change 24: it scores with the round's model)
   (train, score: SQS jobs the worker runs; Step Functions waits for them)
-  select        runs the round's strategy on the scores, marks k images queued
+  select        runs the round's strategy on the scores (random without a model:
+                on the pool list), marks k images queued
   (await labels: lambdas/labeling.py puts the selected images into Label
                 Studio; its webhook resumes the round once all k are labeled, F2)
   merge         new dataset version, model_versions row (if the round
@@ -172,6 +173,10 @@ def snapshot(conn: psycopg.Connection, store: S3Store, run: RoundExecution) -> d
         ),
     )
 
+    out["pool_size"] = len(pool)
+    if run.train is None and run.model is None:
+        # A random round with no model: no score job; select reads the pool list.
+        return out
     strategy = get_strategy(rnd.strategy, seed=rnd.seed, params=rnd.strategy_cfg)
     out["score"] = {
         "job_id": str(job_uuid(run.round_id, JobType.SCORE)),
@@ -183,7 +188,6 @@ def snapshot(conn: psycopg.Connection, store: S3Store, run: RoundExecution) -> d
     # state machine passes it on.
     if run.model is not None:
         out["score"]["model_uri"] = run.model
-    out["pool_size"] = len(pool)
     return out
 
 
@@ -267,15 +271,23 @@ def select(conn: psycopg.Connection, store: Store, round_id: UUID) -> dict[str, 
     rnd = _running(conn, round_id)
     ids = _selection(store, round_id)
     if ids is None:
+        strategy = get_strategy(rnd.strategy, seed=rnd.seed, params=rnd.strategy_cfg)
         body = store.get(scores_key(round_id))
-        if body is None:
+        if body is not None:
+            pool = read_scores(body)
+        elif strategy.requires:
             raise RoundError(f"no scores at {scores_key(round_id)}")
-        pool = read_scores(body)
+        else:
+            # A strategy that needs no scores (random) picks from the pool list.
+            listed = store.get(pool_manifest_key(round_id))
+            if listed is None:
+                raise RoundError(f"no pool list at {pool_manifest_key(round_id)}")
+            column = pq.read_table(io.BytesIO(listed), columns=["image_id"]).column("image_id")
+            pool = PoolData(ids=[str(i) for i in column.to_pylist()])
         counts = dict(
             conn.execute(LABELED_COUNTS_SQL, {"version_id": rnd.base_version_id}).fetchall()
         )
         codes = [c["code"] for c in _classes(conn, rnd.dataset_id)]
-        strategy = get_strategy(rnd.strategy, seed=rnd.seed, params=rnd.strategy_cfg)
         chosen = strategy.select(pool, LabeledStats.from_counts(counts, codes), rnd.k)
         # Only images still in the pool: one that was labeled or rejected
         # since the score job ran is skipped.
