@@ -51,6 +51,7 @@ client_secret=$(aws cognito-idp describe-user-pool-client --region "$REGION" \
   --query UserPoolClient.ClientSecret --output text)
 
 cat > "$dir/.env" <<EOF
+COMPOSE_FILE=docker-compose.yml:docker-compose.logs.yml
 POSTGRES_USER=al
 POSTGRES_PASSWORD=$password
 POSTGRES_DB=al

@@ -61,6 +61,7 @@ from aws_cdk import aws_ec2 as ec2
 from aws_cdk import aws_iam as iam
 from aws_cdk import aws_lambda as lambda_
 from aws_cdk import aws_lambda_event_sources as lambda_events
+from aws_cdk import aws_logs as logs
 from aws_cdk import aws_s3 as s3
 from aws_cdk import aws_s3_notifications as s3n
 from aws_cdk import aws_sqs as sqs
@@ -68,7 +69,7 @@ from aws_cdk import aws_ssm as ssm
 from constructs import Construct
 
 from infra import lambda_code
-from infra.logs import kebab, lambda_logging, saved_queries
+from infra.logs import kebab, lambda_logging, log_group, saved_queries
 from infra.stacks.al_round import STATE_MACHINE_NAME as ROUND_STATE_MACHINE
 from infra.stacks.al_round import AlRound
 from infra.stacks.model_release import STATE_MACHINE_NAME as RELEASE_STATE_MACHINE
@@ -270,6 +271,8 @@ class PlatformStack(Stack):
         policy = self.worker_policy
         data, models = self.data_bucket, self.models_bucket
 
+        # The agent's log lines and job output (worker/logs.py).
+        policy.add_statements(_write_logs(log_group(self, "WorkerLogs", "worker")))
         policy.add_statements(
             iam.PolicyStatement(
                 sid="ConsumeJobs",
@@ -417,6 +420,9 @@ class PlatformStack(Stack):
                 resources=[self.models_bucket.arn_for_objects("mlflow-artifacts/*")],
             )
         )
+        # Docker's awslogs driver: every container's output
+        # (deploy/ec2/docker-compose.logs.yml).
+        role.add_to_policy(_write_logs(log_group(self, "HostLogs", "host")))
         role.add_to_policy(
             iam.PolicyStatement(
                 actions=["s3:ListBucket"],
@@ -1215,3 +1221,11 @@ def _host_setup_commands(volume_id: str, region: str) -> list[str]:
         f"[ -d {REPO_DIR}/.git ] || sudo -u ec2-user git clone {REPO_URL} {REPO_DIR}",
         f"sudo -u ec2-user env AWS_REGION={region} {REPO_DIR}/deploy/ec2/bootstrap.sh",
     ]
+
+
+def _write_logs(group: logs.ILogGroup) -> iam.PolicyStatement:
+    """New streams and lines in this one group; nothing else in CloudWatch."""
+    return iam.PolicyStatement(
+        actions=["logs:CreateLogStream", "logs:PutLogEvents"],
+        resources=[group.log_group_arn],
+    )

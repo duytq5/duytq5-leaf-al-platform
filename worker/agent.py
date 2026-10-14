@@ -20,11 +20,15 @@ Run on the GPU machine (needs Docker with the NVIDIA runtime, the
 
     AWS_PROFILE=leaf-al-worker MLFLOW_TRACKING_URI=http://localhost:5000 \\
         uv run python -m worker.agent
+
+Its log lines and each job's output go to the terminal and to CloudWatch
+(/leaf-al/worker, worker/logs.py), tagged with the job and round.
 """
 
 import json
 import logging
 import os
+import socket
 import subprocess
 import tempfile
 import threading
@@ -36,8 +40,11 @@ from botocore.exceptions import ClientError
 from pydantic import ValidationError
 
 from common.jobs import parse_job
+from worker.logs import job_context, job_fields, stream_name, to_cloudwatch
 
 log = logging.getLogger("worker.agent")
+# The job container's output, line by line (terminal and CloudWatch).
+job_log = logging.getLogger("worker.job")
 
 # Step Functions caps a failure cause at 32,768 characters.
 MAX_CAUSE = 32_768
@@ -93,6 +100,13 @@ class Agent:
                 self._delete(receipt)
             return
 
+        context = job_context.set(job_fields(job))
+        try:
+            self._run(job, receipt)
+        finally:
+            job_context.reset(context)
+
+    def _run(self, job, receipt: str) -> None:
         log.info("job %s (%s) in %s", job.job_id, job.type, job.image)
         stop = threading.Event()
         keeper = threading.Thread(target=self._keep_hidden, args=(receipt, stop), daemon=True)
@@ -192,7 +206,8 @@ class DockerRunner:
                 cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, check=False
             )
             logs = done.stdout or ""
-            print(logs, end="", flush=True)
+            for line in logs.splitlines():
+                job_log.info(line)
             if done.returncode != 0:
                 raise JobFailed(f"the job exited with {done.returncode}:\n{logs[-4000:]}")
             result = Path(out) / "result.json"
@@ -217,6 +232,9 @@ def main() -> None:  # pragma: no cover - wiring only
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     session = boto3.Session()
+    # Off with WORKER_CLOUDWATCH_LOGS=0 (the terminal still shows everything).
+    if os.environ.get("WORKER_CLOUDWATCH_LOGS", "1") != "0":
+        to_cloudwatch(session.client("logs"), stream_name(socket.gethostname()))
     queue_url = (
         os.environ.get("JOB_QUEUE_URL")
         or session.client("ssm").get_parameter(Name=SSM_JOB_QUEUE_URL)["Parameter"]["Value"]

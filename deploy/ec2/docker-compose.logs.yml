@@ -1,0 +1,29 @@
+# On EC2 only: every container's output also goes to CloudWatch Logs,
+# /leaf-al/host, one stream per container (`al logs`, docs/aws-setup.md
+# section 8). write-env.sh turns it on with COMPOSE_FILE in .env; CI and local
+# runs use docker-compose.yml alone. The instance role may write to that group
+# only. `docker compose logs` still works (Docker keeps a local copy).
+#
+# non-blocking: a slow or unreachable CloudWatch drops lines instead of
+# stalling the containers.
+
+x-logging: &cloudwatch
+  driver: awslogs
+  options:
+    awslogs-region: ${AWS_REGION}
+    awslogs-group: /leaf-al/host
+    tag: "{{.Name}}"
+    mode: non-blocking
+    max-buffer-size: 4m
+
+services:
+  postgres:
+    logging: *cloudwatch
+  mlflow:
+    logging: *cloudwatch
+  label-studio:
+    logging: *cloudwatch
+  oauth2-proxy:
+    logging: *cloudwatch
+  caddy:
+    logging: *cloudwatch

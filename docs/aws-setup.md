@@ -601,6 +601,23 @@ state machine event with its input and output (`states/al-round`,
 `states/model-release`). Lambda lines are JSON, and each round or release step
 logs the `round_id`, job id or dataset and commit it ran for.
 
+Two more groups come from outside Lambda:
+
+- `worker`: the worker agent's lines and each job container's output, one
+  stream per agent run (`<hostname>/<start time>`). Every line carries the
+  `job_id`, `round_id` and `job_type` of the job it belongs to. The agent sends
+  them with the `leaf-al-worker` profile; `WORKER_CLOUDWATCH_LOGS=0` keeps them
+  in the terminal only.
+- `host`: every container on the EC2 host (Postgres, MLflow, Label Studio,
+  oauth2-proxy, Caddy), one stream per container, through Docker's awslogs
+  driver (`deploy/ec2/docker-compose.logs.yml`). `docker compose logs` on the
+  host still works.
+
+Turn these on in this order, because a container whose logs cannot reach
+CloudWatch does not start: `cdk deploy` first (it creates both groups and the
+permissions), then `scripts/ec2.sh setup` (recreates the containers with the
+new logging), then restart the worker agent.
+
 Follow one round, release, job or API request, oldest line first:
 
 ```bash
