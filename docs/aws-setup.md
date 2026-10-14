@@ -591,3 +591,29 @@ cdk deploy -c githubOidcProviderArn=arn:aws:iam::<account>:oidc-provider/token.a
 ```
 
 How to start, cancel and release is in the ops repo's README.
+
+## 8. Logs (debugging and demos)
+
+Every part of the stack logs to CloudWatch Logs under `/leaf-al/`, kept 30
+days: `api`, `upload`, `post-confirmation`, `label-studio-hook`, one group per
+round and release step (`round/select`, `release/prepare`, ...) and every
+state machine event with its input and output (`states/al-round`,
+`states/model-release`). Lambda lines are JSON, and each round or release step
+logs the `round_id`, job id or dataset and commit it ran for.
+
+Follow one round, release, job or API request, oldest line first:
+
+```bash
+AWS_PROFILE=leaf-al uv run al logs <round_id>
+AWS_PROFILE=leaf-al uv run al logs <round_id> --since 2d
+AWS_PROFILE=leaf-al uv run al logs --errors --since 1h
+```
+
+A release is found by its dataset or commit (the execution name the release
+workflow prints). The same two searches are saved in the CloudWatch console:
+Logs Insights, Queries, `leaf-al/follow-an-id` (replace `ROUND_ID`) and
+`leaf-al/recent-errors`. Logs Insights charges per GB scanned and the
+POC logs a few MB a day, so searching is free in practice.
+
+The first deploy with these names replaces the old, randomly named Lambda log
+groups and their lines.

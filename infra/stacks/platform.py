@@ -61,7 +61,6 @@ from aws_cdk import aws_ec2 as ec2
 from aws_cdk import aws_iam as iam
 from aws_cdk import aws_lambda as lambda_
 from aws_cdk import aws_lambda_event_sources as lambda_events
-from aws_cdk import aws_logs as logs
 from aws_cdk import aws_s3 as s3
 from aws_cdk import aws_s3_notifications as s3n
 from aws_cdk import aws_sqs as sqs
@@ -69,6 +68,7 @@ from aws_cdk import aws_ssm as ssm
 from constructs import Construct
 
 from infra import lambda_code
+from infra.logs import kebab, lambda_logging, saved_queries
 from infra.stacks.al_round import STATE_MACHINE_NAME as ROUND_STATE_MACHINE
 from infra.stacks.al_round import AlRound
 from infra.stacks.model_release import STATE_MACHINE_NAME as RELEASE_STATE_MACHINE
@@ -212,6 +212,7 @@ class PlatformStack(Stack):
         self._api()
         self._label_studio()
         self._upload_validation()
+        saved_queries(self)
 
         CfnOutput(self, "DataBucketName", value=self.data_bucket.bucket_name)
         CfnOutput(self, "ModelsBucketName", value=self.models_bucket.bucket_name)
@@ -609,12 +610,7 @@ class PlatformStack(Stack):
                     **self._postgres_environment(),
                     "DATA_BUCKET": self.data_bucket.bucket_name,
                 },
-                log_group=logs.LogGroup(
-                    self,
-                    f"{construct_id}Logs",
-                    retention=logs.RetentionDays.ONE_MONTH,
-                    removal_policy=RemovalPolicy.DESTROY,
-                ),
+                **lambda_logging(self, f"{construct_id}Logs", f"control/{kebab(construct_id)}"),
             )
 
         self.start_round_fn = control("StartRoundFn", "leaf-al-start-round", "start_round_handler")
@@ -904,12 +900,6 @@ class PlatformStack(Stack):
         )
         if upload_limit < 1:
             raise ValueError("uploadDailyLimit must be at least 1")
-        log_group = logs.LogGroup(
-            self,
-            "ApiLogs",
-            retention=logs.RetentionDays.ONE_MONTH,
-            removal_policy=RemovalPolicy.DESTROY,
-        )
         fn = lambda_.Function(
             self,
             "ApiFn",
@@ -935,7 +925,7 @@ class PlatformStack(Stack):
                 "LABEL_STUDIO_URL": f"https://{self.label_studio_domain}",
                 "MLFLOW_URL": "http://localhost:5000",
             },
-            log_group=log_group,
+            **lambda_logging(self, "ApiLogs", "api"),
         )
         # Presigned links work only for what the signer may do: download
         # released models, upload app images to incoming/. A round's
@@ -1010,12 +1000,7 @@ class PlatformStack(Stack):
                 "RECORD_LABEL_FUNCTION": record_fn.function_name,
                 "LS_WEBHOOK_SECRET": webhook_secret,
             },
-            log_group=logs.LogGroup(
-                self,
-                "LabelStudioHookLogs",
-                retention=logs.RetentionDays.ONE_MONTH,
-                removal_policy=RemovalPolicy.DESTROY,
-            ),
+            **lambda_logging(self, "LabelStudioHookLogs", "label-studio-hook"),
         )
         record_fn.grant_invoke(hook)
         # SendTaskSuccess has no resource-level permissions; the token scopes it.
@@ -1111,12 +1096,7 @@ class PlatformStack(Stack):
             vpc_subnets=ec2.SubnetSelection(subnets=[self.lambda_subnet]),
             security_groups=[self.lambda_sg],
             environment={**self._postgres_environment(), "DATA_BUCKET": data.bucket_name},
-            log_group=logs.LogGroup(
-                self,
-                "UploadLogs",
-                retention=logs.RetentionDays.ONE_MONTH,
-                removal_policy=RemovalPolicy.DESTROY,
-            ),
+            **lambda_logging(self, "UploadLogs", "upload"),
         )
         fn.add_event_source(
             lambda_events.SqsEventSource(queue, batch_size=5, report_batch_item_failures=True)
@@ -1133,12 +1113,6 @@ class PlatformStack(Stack):
         CfnOutput(self, "UploadDlqUrl", value=dlq.queue_url)
 
     def _post_confirmation_fn(self) -> lambda_.Function:
-        log_group = logs.LogGroup(
-            self,
-            "PostConfirmationLogs",
-            retention=logs.RetentionDays.ONE_MONTH,
-            removal_policy=RemovalPolicy.DESTROY,
-        )
         fn = lambda_.Function(
             self,
             "PostConfirmationFn",
@@ -1148,7 +1122,7 @@ class PlatformStack(Stack):
                 str(LAMBDAS_DIR / "post_confirmation"), exclude=["__pycache__", "*.pyc"]
             ),
             timeout=Duration.seconds(10),
-            log_group=log_group,
+            **lambda_logging(self, "PostConfirmationLogs", "post-confirmation"),
         )
         # The pool ARN would make a cycle (the pool references this function),
         # so the grant covers user pools of this account and region; the

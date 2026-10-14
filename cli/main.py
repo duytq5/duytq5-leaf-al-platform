@@ -2,6 +2,7 @@ import argparse
 import json
 import os
 import sys
+from datetime import UTC, datetime
 from pathlib import Path
 
 from pydantic import ValidationError
@@ -182,6 +183,25 @@ def cmd_seed(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_logs(args: argparse.Namespace) -> int:
+    from cli import logs
+
+    if not args.id and not args.errors:
+        args.parser.error("give an id to follow, or --errors")
+    end = datetime.now(UTC)
+    start = end - logs.parse_since(args.since)
+    client = logs.client()
+    if args.errors:
+        rows = logs.recent_errors(client, start, end)
+    else:
+        rows = logs.follow(client, args.id, start, end)
+    for row in rows:
+        print(logs.format_row(row))
+    if not rows:
+        print(f"no log lines in the last {args.since}", file=sys.stderr)
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="al", description="Active-learning operator CLI")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -223,6 +243,16 @@ def main(argv: list[str] | None = None) -> int:
         "--dry-run", action="store_true", help="show the split; no upload, no database"
     )
 
+    logs = sub.add_parser(
+        "logs",
+        help="print every /leaf-al/ log line about a round, job, release or request",
+        description="Needs AWS credentials (AWS_PROFILE=leaf-al).",
+    )
+    logs.add_argument("id", nargs="?", help="a round_id, job id, dataset, commit or request id")
+    logs.add_argument("--since", default="7d", help="how far back: 30m, 6h, 7d (default 7d)")
+    logs.add_argument("--errors", action="store_true", help="recent errors from every part")
+    logs.set_defaults(parser=logs)
+
     args = parser.parse_args(argv)
     if args.command == "db":
         return {"migrate": cmd_db_migrate}[args.db_command](args)
@@ -234,6 +264,7 @@ def main(argv: list[str] | None = None) -> int:
         "release-input": cmd_release_input,
         "round-input": cmd_round_input,
         "seed": cmd_seed,
+        "logs": cmd_logs,
     }
     return handlers[args.command](args)
 

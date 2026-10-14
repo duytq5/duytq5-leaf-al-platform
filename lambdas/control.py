@@ -23,6 +23,7 @@ from pydantic import BaseModel, ConfigDict, ValidationError
 
 from common.round import RoundConfig, RoundExecution, TrainSection
 from common.types import CommitSha, GitHubLogin, WorkerImage
+from lambdas.logs import traced
 from lambdas.postgres import open_db
 from lambdas.round import S3Store, Store, end_round
 from recipes import get_recipe
@@ -145,12 +146,14 @@ def _store() -> S3Store:
     return S3Store(os.environ["DATA_BUCKET"])
 
 
+@traced
 def start_round_handler(event: dict, _context) -> dict:
     ev = StartRound.model_validate(event)
     with open_db() as conn:
         return start_round(conn, ev)
 
 
+@traced
 def cancel_round_handler(event: dict, _context) -> dict:
     round_id = _Cancel.model_validate(event).round_id
     with open_db() as conn:
