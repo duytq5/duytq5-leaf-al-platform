@@ -33,6 +33,7 @@ from pydantic import BaseModel, ConfigDict
 from common.jobs import JobType, TrainResult, TrainSpec, job_uuid
 from common.round import RoundExecution
 from common.s3keys import manifest_key, pool_manifest_key, raw_key, scores_key, selection_key
+from lambdas.logs import traced
 from lambdas.postgres import open_db
 from selection.base import LABELED_COUNTS_SQL, LabeledStats, PoolData, get_strategy
 
@@ -386,22 +387,26 @@ def _store() -> S3Store:
     return S3Store(os.environ["DATA_BUCKET"])
 
 
+@traced
 def mark_running_handler(event: dict, _context) -> dict:
     with open_db() as conn:
         return mark_running(conn, _Event.model_validate(event).round_id)
 
 
+@traced
 def snapshot_handler(event: dict, _context) -> dict:
     run = RoundExecution.model_validate(event)
     with open_db() as conn:
         return snapshot(conn, _store(), run)
 
 
+@traced
 def select_handler(event: dict, _context) -> dict:
     with open_db() as conn:
         return select(conn, _store(), _Event.model_validate(event).round_id)
 
 
+@traced
 def merge_handler(event: dict, _context) -> dict:
     ev = _MergeEvent.model_validate(event)
     run = RoundExecution(round_id=ev.round_id, image=ev.image, train=ev.train)
@@ -409,6 +414,7 @@ def merge_handler(event: dict, _context) -> dict:
         return merge(conn, _store(), run, ev.train_result)
 
 
+@traced
 def fail_handler(event: dict, _context) -> None:
     with open_db() as conn:
         fail(conn, _store(), _Event.model_validate(event).round_id)

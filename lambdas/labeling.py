@@ -30,6 +30,7 @@ import psycopg
 
 from common.s3keys import raw_key, scores_key
 from lambdas import label_studio as ls
+from lambdas.logs import traced
 from lambdas.postgres import open_db
 from lambdas.round import S3Store, Store, _classes, _running, _selection, read_scores
 
@@ -190,6 +191,7 @@ def _studio() -> ls.LabelStudio:
     return ls.LabelStudio(os.environ["LS_URL"], os.environ["LS_API_TOKEN"])
 
 
+@traced
 def start_handler(event: dict, _context) -> dict:
     bucket = os.environ["DATA_BUCKET"]
     with open_db() as conn:
@@ -205,6 +207,7 @@ def start_handler(event: dict, _context) -> dict:
         )
 
 
+@traced
 def record_handler(event: dict, _context) -> dict:
     """Invoked by the webhook Lambda with a parsed LabelEvent."""
     ev = ls.LabelEvent(

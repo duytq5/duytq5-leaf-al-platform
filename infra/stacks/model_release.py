@@ -13,16 +13,16 @@ GitHub job may wait for the execution, so the commit check shows how the
 release ended. Turn the worker on before merging a release.
 """
 
-from aws_cdk import Duration, RemovalPolicy
+from aws_cdk import Duration
 from aws_cdk import aws_ec2 as ec2
 from aws_cdk import aws_lambda as lambda_
-from aws_cdk import aws_logs as logs
 from aws_cdk import aws_sqs as sqs
 from aws_cdk import aws_stepfunctions as sfn
 from aws_cdk import aws_stepfunctions_tasks as tasks
 from constructs import Construct
 
 from infra import lambda_code
+from infra.logs import kebab, lambda_logging, log_group
 from infra.stacks.al_round import TRANSIENT_ERRORS
 
 STATE_MACHINE_NAME = "model-release"
@@ -59,12 +59,7 @@ class ModelRelease(Construct):
                 vpc_subnets=ec2.SubnetSelection(subnets=[subnet]),
                 security_groups=[security_group],
                 environment=environment,
-                log_group=logs.LogGroup(
-                    self,
-                    f"{name}Logs",
-                    retention=logs.RetentionDays.ONE_MONTH,
-                    removal_policy=RemovalPolicy.DESTROY,
-                ),
+                **lambda_logging(self, f"{name}Logs", f"release/{kebab(name)}"),
             )
 
         execution = {f: sfn.JsonPath.string_at(f"$.{f}") for f in EXECUTION_FIELDS}
@@ -124,4 +119,9 @@ class ModelRelease(Construct):
             "StateMachine",
             state_machine_name=STATE_MACHINE_NAME,
             definition_body=sfn.DefinitionBody.from_chainable(chain),
+            logs=sfn.LogOptions(
+                destination=log_group(self, "StateMachineLogs", f"states/{STATE_MACHINE_NAME}"),
+                level=sfn.LogLevel.ALL,
+                include_execution_data=True,
+            ),
         )

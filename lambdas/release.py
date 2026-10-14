@@ -25,6 +25,7 @@ from common.jobs import ExportSpec
 from common.release import ExportResult, ReleaseExecution, export_job_uuid
 from common.s3keys import edge_prefix
 from common.types import WORKER_IMAGE_REPO
+from lambdas.logs import traced
 from lambdas.postgres import open_db
 
 
@@ -125,12 +126,14 @@ class _RecordEvent(ReleaseExecution):
     export: ExportResult
 
 
+@traced
 def prepare_handler(event: dict, _context) -> dict:
     ev = ReleaseExecution.model_validate(event)
     with open_db() as conn:
         return prepare(conn, ev)
 
 
+@traced
 def record_handler(event: dict, _context) -> dict:
     full = _RecordEvent.model_validate(event)
     ev = ReleaseExecution.model_validate(full.model_dump(exclude={"export"}))
