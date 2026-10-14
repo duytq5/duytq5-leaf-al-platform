@@ -93,11 +93,6 @@ def repo(tmp_path, monkeypatch):
     return tmp_path / "configs/releases"
 
 
-def test_check_release_accepts_the_repo_files(monkeypatch, capsys):
-    monkeypatch.chdir(ROOT)
-    assert main(["check-release"]) == 0
-
-
 def test_check_release_ok(repo, capsys):
     (repo / "durian.yaml").write_text("model: durian-fastvit\nversion: 2\n")
     assert main(["check-release"]) == 0
@@ -114,6 +109,20 @@ def test_check_release_rejects_a_bad_file(repo, capsys):
     (repo / "durian.yaml").write_text("model: durian-fastvit\nversion: -1\n")
     assert main(["check-release"]) == 1
     assert "durian.yaml" in capsys.readouterr().out
+
+
+def test_check_release_from_the_ops_repo(tmp_path, monkeypatch, capsys):
+    """The ops repo's CI runs the pinned platform's `al` on its own release
+    files, with the platform checkout's dataset configs."""
+    (tmp_path / "ops/configs/releases").mkdir(parents=True)
+    (tmp_path / "ops/configs/releases/durian.yaml").write_text("model: d\nversion: 1\n")
+    (tmp_path / "platform/configs/datasets").mkdir(parents=True)
+    monkeypatch.chdir(tmp_path / "ops")
+    args = ["check-release", "--datasets", str(tmp_path / "platform/configs/datasets")]
+    assert main(args) == 1
+    assert "no dataset durian" in capsys.readouterr().out
+    (tmp_path / "platform/configs/datasets/durian.yaml").write_text("name: durian\n")
+    assert main(args) == 0
 
 
 def test_check_release_with_no_files(repo, capsys):
@@ -264,3 +273,22 @@ def test_rerunning_an_old_release_commit_changes_nothing(db, durian):
     # The first release's workflow is re-run after the second one.
     assert release.record(db, _execution(1, "1" * 40), _export(1))["action"] is None
     assert [r[0] for r in _releases(db)] == [1, 2]
+
+
+# al release-input (the release workflow builds the execution input with it)
+
+
+def test_release_input_prints_the_execution_input(repo, capsys):
+    import json
+
+    (repo / "durian.yaml").write_text("model: durian-fastvit\nversion: 2\n")
+    args = ["release-input", "configs/releases/durian.yaml", "--released-by", "duytq5"]
+    assert main([*args, "--commit-sha", COMMIT]) == 0
+    out = json.loads(capsys.readouterr().out)
+    assert ReleaseExecution.model_validate(out) == _execution(2)
+
+
+def test_release_input_refuses_a_bad_file(repo, capsys):
+    (repo / "durian.yaml").write_text("model: durian-fastvit\nversion: 0\n")
+    args = ["release-input", "configs/releases/durian.yaml", "--released-by", "duytq5"]
+    assert main([*args, "--commit-sha", COMMIT]) == 1

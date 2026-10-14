@@ -21,7 +21,6 @@ uploads images and downloads ONNX models.
 | `configs/datasets/` | YAML dataset configs: the class list (code + display name) and the fixed train/val/test split |
 | `configs/train/` | YAML training configs |
 | `configs/rounds/` | YAML round configs: strategy, its parameters and k, chosen by a human per round |
-| `configs/releases/` | One YAML per dataset: the model version the app gets (`al check-release` validates them) |
 | `tests/` | Unit tests |
 
 ## Development
