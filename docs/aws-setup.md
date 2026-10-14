@@ -429,6 +429,34 @@ with `--profile leaf-al-worker`. Then set `MLFLOW_TRACKING_URI=http://localhost:
 The worker user can open port-forwarding sessions to this one instance only. It
 cannot open a shell.
 
+### Run the worker
+
+The GPU machine needs Docker, the NVIDIA container toolkit and an NVIDIA
+driver for CUDA 13 (R580 or newer; the RTX 5070 needs CUDA 12.8+). Check with
+`docker run --rm --gpus all nvidia/cuda:13.0.0-base-ubuntu24.04 nvidia-smi`.
+Then, from a clone of this repo, with the MLflow tunnel open:
+
+```bash
+uv sync
+AWS_PROFILE=leaf-al-worker AWS_REGION=ap-southeast-2 MLFLOW_TRACKING_URI=http://localhost:5000 uv run python -m worker.agent
+```
+
+The agent waits for jobs on the queue (`/leaf-al/queues/jobs-url`) and runs
+each one in the worker image its round or release names
+(`ghcr.io/duytq5/duytq5-leaf-al-platform-worker:<commit>`), pulled on first
+use. Images and pretrained weights are cached in `~/.cache/leaf-al`
+(`WORKER_CACHE_DIR`), so a round downloads only new images. Stop it with
+Ctrl-C at any time: an unfinished job goes back to the queue and runs again
+when the agent is back. To try an image built locally, tag it with the
+commit the round names:
+`docker build -f worker/Dockerfile --build-arg GIT_SHA=$(git rev-parse HEAD) -t ghcr.io/duytq5/duytq5-leaf-al-platform-worker:$(git rev-parse HEAD) .`
+
+The `worker-image` workflow builds and pushes that image for every commit
+merged to `main`, so whichever commit the ops repo pins has one. GHCR makes a
+new package private. Once, after the first build, open
+https://github.com/users/duytq5/packages/container/duytq5-leaf-al-platform-worker/settings
+and set its visibility to Public, so the GPU machine pulls without a login.
+
 ## 5. Persistent data volume
 
 All Postgres data (metadata and the MLflow database, later Label Studio) lives
@@ -565,5 +593,5 @@ How to release, roll back and start rounds is in the ops repo's README.
 
 ## 8. Later
 
-The worker's train and score jobs and the GitHub start-round workflow are
-added by later PRs; this file gets their steps as they land.
+The GitHub start-round workflow is added by a later PR; this file gets its
+steps when it lands.

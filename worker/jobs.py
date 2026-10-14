@@ -1,22 +1,39 @@
-"""Job dispatch. Handlers are implemented in Phase 1 (train, score) and Phase 3 (export)."""
+"""Job dispatch inside the worker image: one handler per job type, each
+returning the output sent back with SendTaskSuccess. The work is in
+worker.compute; the environment (S3, cache, models bucket) comes from the
+container's environment, set by the agent."""
 
 from collections.abc import Callable
+from functools import cache
 
 from common.jobs import ExportJob, JobType, ScoreJob, TrainJob
 
 Job = TrainJob | ScoreJob | ExportJob
 
 
+@cache
+def _env():  # pragma: no cover - wiring only
+    from worker.compute import WorkerEnv
+
+    return WorkerEnv.from_environ()
+
+
 def run_train(job: TrainJob) -> dict:
-    raise NotImplementedError("train job: Phase 1")
+    from worker.compute import run_train
+
+    return run_train(job, _env())
 
 
 def run_score(job: ScoreJob) -> dict:
-    raise NotImplementedError("score job: Phase 1")
+    from worker.compute import run_score
+
+    return run_score(job, _env())
 
 
 def run_export(job: ExportJob) -> dict:
-    raise NotImplementedError("export job: Phase 3")
+    from worker.compute import run_export
+
+    return run_export(job, _env())
 
 
 HANDLERS: dict[JobType, Callable[..., dict]] = {

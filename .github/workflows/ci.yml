@@ -36,3 +36,16 @@ jobs:
           fi
           # verify-full: the certificate must also name the host (strict clients need it).
           TEST_DATABASE_URL="$url?sslmode=verify-full&sslrootcert=deploy/ec2/tls/ca.crt" uv run pytest
+
+  # Train, score and export for real on the CPU with a tiny model (torch,
+  # timm, MLflow on SQLite, ONNX Runtime). The test job skips these.
+  worker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: "3.13"
+          enable-cache: false   # torch with CUDA is several GB
+      - run: uv sync --locked --extra worker
+      - run: uv run pytest tests/test_worker_compute.py tests/test_recipes.py tests/test_worker.py

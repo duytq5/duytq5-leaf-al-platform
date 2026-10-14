@@ -199,6 +199,7 @@ def snapshot(conn: psycopg.Connection, store: S3Store, run: RoundExecution) -> d
 
     train = TrainSpec(
         **run.train.model_dump(),
+        dataset=rnd.dataset,
         manifest_uri=store.uri(manifest),
         classes=_classes(conn, rnd.dataset_id),
     )

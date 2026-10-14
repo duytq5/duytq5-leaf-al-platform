@@ -66,3 +66,26 @@ def test_looking_up_recipes_does_not_import_torch():
         "assert 'torch' not in sys.modules and 'timm' not in sys.modules"
     )
     subprocess.run([sys.executable, "-c", code], check=True)
+
+
+def test_recipe_contract():
+    """The recipe's model gives one output per class, in class order, from what
+    its eval transforms make of an image of any size."""
+    pytest.importorskip("torch")
+    pytest.importorskip("timm")
+    from PIL import Image
+
+    params = {"arch": "test_efficientnet", "pretrained": False, "input_size": 32}
+    recipe = get_recipe("timm_classifier", params)
+    model = recipe.build_model(3, base=None).eval()
+    x = recipe.eval_transforms()(Image.new("RGB", (50, 40)))
+    assert tuple(x.shape) == (3, 32, 32)
+    assert tuple(model(x.unsqueeze(0)).shape) == (1, 3)
+    assert recipe.preprocess().input_size == (32, 32)
+
+
+def test_registered_model_name():
+    assert get_recipe("timm_classifier", {}).model_name("rocole") == "rocole-fastvit"
+    assert get_recipe("timm_classifier", {"arch": "convnext_tiny"}).model_name("durian") == (
+        "durian-convnext"
+    )

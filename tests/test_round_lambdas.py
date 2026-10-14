@@ -166,6 +166,7 @@ def test_a_round_from_start_to_merge(env):
     )
     assert job.job_id == job_uuid(rid, JobType.TRAIN)
     assert [c.code for c in job.spec.classes] == ["a", "b"]
+    assert job.spec.dataset == "toy"  # names the registered model
     assert (job.spec.recipe, job.spec.params, job.spec.base_model) == (
         "timm_classifier",
         {"epochs": 1, "batch_size": 8},

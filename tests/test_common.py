@@ -83,6 +83,7 @@ def _train() -> dict:
         "recipe": "timm_classifier",
         "params": {"epochs": 2},
         "base_model": None,
+        "dataset": "durian",
         "manifest_uri": "s3://al-data/manifests/durian/v7.parquet",
         "classes": CLASSES,
     }
