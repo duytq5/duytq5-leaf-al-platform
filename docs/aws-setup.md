@@ -451,6 +451,12 @@ when the agent is back. To try an image built locally, tag it with the
 commit the round names:
 `docker build -f worker/Dockerfile --build-arg GIT_SHA=$(git rev-parse HEAD) -t ghcr.io/duytq5/duytq5-leaf-al-platform-worker:$(git rev-parse HEAD) .`
 
+The `worker-image` workflow builds and pushes that image for every commit
+merged to `main`, so whichever commit the ops repo pins has one. GHCR makes a
+new package private. Once, after the first build, open
+https://github.com/users/duytq5/packages/container/duytq5-leaf-al-platform-worker/settings
+and set its visibility to Public, so the GPU machine pulls without a login.
+
 ## 5. Persistent data volume
 
 All Postgres data (metadata and the MLflow database, later Label Studio) lives
