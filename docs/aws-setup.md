@@ -115,6 +115,7 @@ Deploy-time settings are CDK context values (`-c key=value`):
 | `mobileCallbackUrls` | `leafal://auth/callback` | Comma-separated sign-in redirects of the app |
 | `adminCallbackUrls` | `http://localhost:8080/auth/callback` | Comma-separated sign-in redirects of admin tools |
 | `labelStudioDomain` | `<Elastic IP>.sslip.io` | Label Studio's host name. The default needs no domain: sslip.io resolves it to the IP, and Caddy gets a Let's Encrypt certificate for it |
+| `viewerDomain` | `view.<Elastic IP>.sslip.io` | Image viewer's (FiftyOne) host name, section 3c |
 
 ## 1. Secrets in SSM Parameter Store (before the first deploy)
 
@@ -409,6 +410,31 @@ If the label step fails with `LabelStudioError`, the instance was probably
 stopped or Label Studio was restarting; the step retries for a few minutes on
 its own. Check the containers with `scripts/ec2.sh shell`, then
 `cd ~/duytq5-leaf-al-platform/deploy/ec2 && docker compose ps`.
+
+## 3c. Image viewer (FiftyOne)
+
+A read-only view of every image: thumbnails you can filter by split, status
+(`unlabeled`, `queued`, `labeled`, `rejected`), source (`seed` or `edge` for
+app uploads), label in the latest version, the versions that hold an image, a
+label from a running round that has not merged yet (`new_label`), and the
+app's guess (`app_prediction`). One FiftyOne dataset per platform dataset.
+
+```
+browser -> https://<ViewerUrl> (Caddy, Let's Encrypt)
+        -> viewer-gate (oauth2-proxy): Cognito sign-in, group admins only
+        -> viewer-app (FiftyOne) <- mongo <- viewer-sync (Postgres + S3 raw/)
+```
+
+`viewer-sync` refreshes every 10 minutes and keeps local copies of the images
+under `/data/viewer/media` (open-source FiftyOne shows local files only). The
+first sync after a deploy downloads the whole dataset. Nothing here starts a
+round: that is still a merge in the ops repo.
+
+After `cdk deploy` (adds the domain and the Cognito callback), run
+`scripts/ec2.sh setup`, then open `ViewerUrl` and sign in with your Cognito
+admin account. The viewer adds about 1.3 GB of memory limits to the host; if
+Label Studio or MLflow get slow, `docker stats` shows who uses what, and
+`instanceType=t3.large` is the next size up.
 
 ## 4. Worker credentials (on the RTX 5070 machine)
 

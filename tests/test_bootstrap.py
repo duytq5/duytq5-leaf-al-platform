@@ -88,6 +88,7 @@ def test_label_studio_settings_and_database(tmp_path):
         if "=" in line
     )
     assert env["LS_DOMAIN"] == SECRET  # the stub answers every SSM read with SECRET
+    assert env["VIEWER_DOMAIN"] == SECRET
     assert env["LS_ADMIN_EMAIL"] == "owner@example.com"
     assert env["LS_ADMIN_PASSWORD"] == LABEL_STUDIO["admin_password"]
     assert env["LS_API_TOKEN"] == LABEL_STUDIO["api_token"]
@@ -102,6 +103,7 @@ def test_label_studio_settings_and_database(tmp_path):
         in calls
     )
     assert "cognito-idp describe-user-pool-client" in calls
+    assert "--name /leaf-al/viewer/domain" in calls
     # Its database exists before Label Studio starts.
     create = calls.index("CREATE DATABASE labelstudio")
     assert calls.index("docker compose up -d --wait postgres") < create
