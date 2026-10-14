@@ -1,7 +1,7 @@
-# One AL round, chosen by a human (see common/round.py). Merging a new file
-# here to main starts the round.
+# One AL round, chosen by a human (see common/round.py). Round files live in
+# the ops repo (configs/rounds/); merging one there to main starts the round.
 # List recipes and strategies with their parameters:  uv run al recipes / uv run al strategies
-# Check this file (CI does too):  uv run al check-round configs/rounds/example.yaml
+# Check this file:  uv run al check-round configs/examples/round.yaml
 dataset: rocole
 # base_version: 0  # dataset version to train on; default: the latest
 train:

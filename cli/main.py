@@ -25,7 +25,8 @@ def cmd_recipes(args: argparse.Namespace) -> int:
 
 def cmd_check_round(args: argparse.Namespace) -> int:
     """Validate a round config: its dataset, recipe params and strategy params
-    (run from the repo root; no AWS, no torch)."""
+    (no AWS, no torch; from the ops repo, --datasets points at the platform
+    checkout's dataset configs)."""
     try:
         cfg = RoundConfig.from_yaml(args.config)
         recipe = get_recipe(cfg.train.recipe, cfg.train.params)
@@ -36,7 +37,7 @@ def cmd_check_round(args: argparse.Namespace) -> int:
     except (OSError, ValidationError) as e:
         print(e)
         return 1
-    dataset = Path("configs/datasets") / f"{cfg.dataset}.yaml"
+    dataset = Path(args.datasets) / f"{cfg.dataset}.yaml"
     if not dataset.is_file():
         print(f"no dataset {cfg.dataset} ({dataset} does not exist)")
         return 1
@@ -166,6 +167,7 @@ def main(argv: list[str] | None = None) -> int:
     sub.add_parser("recipes", help="list training recipes and their parameters")
     check = sub.add_parser("check-round", help="validate a round config YAML")
     check.add_argument("config")
+    check.add_argument("--datasets", default="configs/datasets", help="folder of dataset configs")
     check_release = sub.add_parser("check-release", help="validate configs/releases/*.yaml")
     check_release.add_argument(
         "--datasets", default="configs/datasets", help="folder of dataset configs"

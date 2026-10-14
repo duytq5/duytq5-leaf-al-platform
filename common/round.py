@@ -1,8 +1,9 @@
-"""Human-written settings for an AL round: configs/rounds/<name>.yaml.
+"""Human-written settings for an AL round: configs/rounds/<name>.yaml in the
+ops repo (example: configs/examples/round.yaml).
 
 The owner explores the data, then picks the training recipe and the selection
-strategy, their parameters and k for each round. Merging the file to main
-starts the round (design doc, "Control through GitHub"). Nothing about
+strategy, their parameters and k for each round. Merging the file to the ops
+repo's main starts the round (design doc, "Control through GitHub"). Nothing about
 training or selection is hardcoded in the pipeline; the chosen values are
 stored on the `rounds` row and model_versions.train_config, so every round
 is reproducible.

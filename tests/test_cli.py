@@ -15,7 +15,7 @@ def _at_repo_root(monkeypatch):
 
 
 def test_example_round_config_loads():
-    cfg = RoundConfig.from_yaml("configs/rounds/example.yaml")
+    cfg = RoundConfig.from_yaml("configs/examples/round.yaml")
     assert cfg.selection.strategy == "random"
     assert cfg.selection.k == 50
 
@@ -26,7 +26,7 @@ def test_strategies_command(capsys):
 
 
 def test_check_round_ok(capsys):
-    assert main(["check-round", "configs/rounds/example.yaml"]) == 0
+    assert main(["check-round", "configs/examples/round.yaml"]) == 0
     assert capsys.readouterr().out.startswith("ok:")
 
 
@@ -48,10 +48,26 @@ def test_recipes_command(capsys):
     ],
 )
 def test_check_round_rejects(tmp_path, capsys, old, new, message):
-    text = (ROOT / "configs/rounds/example.yaml").read_text()
+    text = (ROOT / "configs/examples/round.yaml").read_text()
     assert old in text
     text = text.replace(old, new)
     bad = tmp_path / "round.yaml"
     bad.write_text(text)
     assert main(["check-round", os.fspath(bad)]) == 1
     assert message in capsys.readouterr().out
+
+
+def test_check_round_from_the_ops_repo(tmp_path, monkeypatch, capsys):
+    """The ops repo's CI checks its round files with the pinned platform's
+    `al` and the platform checkout's dataset configs."""
+    rounds = tmp_path / "ops/configs/rounds"
+    rounds.mkdir(parents=True)
+    (rounds / "r1.yaml").write_text((ROOT / "configs/examples/round.yaml").read_text())
+    datasets = tmp_path / "platform/configs/datasets"
+    datasets.mkdir(parents=True)
+    monkeypatch.chdir(tmp_path / "ops")
+    args = ["check-round", "configs/rounds/r1.yaml", "--datasets", str(datasets)]
+    assert main(args) == 1
+    assert "no dataset rocole" in capsys.readouterr().out
+    (datasets / "rocole.yaml").write_text("name: rocole\n")
+    assert main(args) == 0

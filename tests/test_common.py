@@ -24,11 +24,11 @@ SHA = "a" * 64
 
 
 def _round_dict() -> dict:
-    return RoundConfig.from_yaml(ROOT / "configs/rounds/example.yaml").model_dump(mode="json")
+    return RoundConfig.from_yaml(ROOT / "configs/examples/round.yaml").model_dump(mode="json")
 
 
 def test_example_round_config_has_an_inline_train_section():
-    cfg = RoundConfig.from_yaml(ROOT / "configs/rounds/example.yaml")
+    cfg = RoundConfig.from_yaml(ROOT / "configs/examples/round.yaml")
     assert cfg.train.recipe == "timm_classifier"
     assert cfg.train.base_model is None
     assert cfg.base_version is None  # the dataset's latest version

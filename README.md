@@ -20,7 +20,7 @@ uploads images and downloads ONNX models.
 | `cli/` | Operator CLI `al` |
 | `configs/datasets/` | YAML dataset configs: the class list (code + display name) and the fixed train/val/test split |
 | `recipes/` | Training recipes: a registered `TrainRecipe` with its `Params` per model family (`al recipes`) |
-| `configs/rounds/` | YAML round configs: strategy, its parameters and k, chosen by a human per round |
+| `configs/examples/` | An example round config; real round files live in the ops repo's `configs/rounds/` |
 | `tests/` | Unit tests |
 
 ## Development
@@ -105,13 +105,13 @@ selection: {strategy: random, params: {}, k: 50, seed: 42}
 ```bash
 uv run al recipes                                      # training recipes and their parameters
 uv run al strategies                                   # names, required inputs, parameters
-uv run al check-round configs/rounds/example.yaml      # validate before starting
+uv run al check-round configs/examples/round.yaml      # validate before starting
 ```
 
 Unknown recipes or strategies, misspelled parameters and invalid k are
 rejected. The chosen values are stored on the round's row and its model
 version, so every round can be reproduced. A round starts when its config
-merges to `main`.
+merges to `main` of the ops repo.
 
 ## Rules
 
