@@ -44,6 +44,19 @@ def test_check_round_without_train(tmp_path, capsys):
     assert "scores with models:/rocole-fastvit@champion" in capsys.readouterr().out
 
 
+def test_check_training(tmp_path, capsys):
+    """Change 24: the ops repo's CI checks configs/trainings/*.yaml."""
+    assert main(["check-training", "configs/examples/training.yaml"]) == 0
+    assert capsys.readouterr().out.startswith("ok: training on rocole latest version")
+    bad = tmp_path / "t.yaml"
+    bad.write_text("dataset: rocole\ntrain: {recipe: nope}\n")
+    assert main(["check-training", os.fspath(bad)]) == 1
+    assert "unknown recipe" in capsys.readouterr().out
+    bad.write_text("dataset: pepper\ntrain: {recipe: timm_classifier}\n")
+    assert main(["check-training", os.fspath(bad)]) == 1
+    assert "no dataset pepper" in capsys.readouterr().out
+
+
 def test_recipes_command(capsys):
     assert main(["recipes"]) == 0
     assert '"timm_classifier"' in capsys.readouterr().out

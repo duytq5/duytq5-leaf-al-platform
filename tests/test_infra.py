@@ -376,6 +376,44 @@ def test_round_waits_for_the_worker_and_the_labels(full):
     assert labels["Parameters"]["Payload"]["task_token.$"] == "$$.Task.Token"
 
 
+def test_training_state_machine_trains_then_records(full):
+    """Change 24: al-train, started by the ops repo's start-training workflow."""
+    definition = _definition(full, "al-train")
+    states = definition["States"]
+    assert _order(definition) == [
+        "MarkRunning", "Snapshot", "Train", "Record", "TrainingSucceeded",
+    ]  # fmt: skip
+    for step in ("MarkRunning", "Snapshot", "Train", "Record"):
+        assert states[step]["Catch"][0]["Next"] == "MarkFailed"
+    assert states["MarkFailed"]["Next"] == "TrainingFailed"
+    train = states["Train"]
+    assert train["Resource"].endswith(":states:::sqs:sendMessage.waitForTaskToken")
+    body = train["Parameters"]["MessageBody"]
+    assert body["type"] == "train" and body["task_token.$"] == "$$.Task.Token"
+    assert body["training_id.$"] == "$.training_id" and "round_id" not in body
+    assert body["spec.$"] == "$.snapshot.spec"
+    assert "HeartbeatSeconds" not in train and train["TimeoutSeconds"] == 14 * 24 * 3600
+    assert states["Record"]["Parameters"]["train_result.$"] == "$.train_result"
+    full.has_resource_properties(
+        "AWS::SSM::Parameter", {"Name": "/leaf-al/state-machines/al-train"}
+    )
+    handlers = {
+        p["Properties"]["Handler"]
+        for k, p in full.find_resources("AWS::Lambda::Function").items()
+        if k.startswith("AlTrain")
+    }
+    assert handlers == {
+        f"lambdas.training.{h}_handler" for h in ("mark_running", "snapshot", "record", "fail")
+    }
+    full.has_resource_properties(
+        "AWS::Lambda::Function",
+        {
+            "FunctionName": "leaf-al-start-training",
+            "Handler": "lambdas.training.start_training_handler",
+        },
+    )
+
+
 def test_state_machine_arn_is_in_ssm(full):
     full.has_resource_properties(
         "AWS::SSM::Parameter", {"Name": "/leaf-al/state-machines/al-round"}
@@ -515,16 +553,20 @@ def test_github_role_may_only_run_rounds_and_releases(full):
     }
     start = resources["states:StartExecution"]
     assert "ModelReleaseStateMachine" in start and "AlRoundStateMachine" in start
+    assert "AlTrainStateMachine" in start
     describe = resources["states:DescribeExecution"]
     assert ":execution:model-release:*" in describe and ":execution:al-round:*" in describe
+    assert ":execution:al-train:*" in describe
     # Cancelling stops a round; releases are never stopped from GitHub.
     assert ":execution:al-round:*" in resources["states:StopExecution"]
     assert "model-release" not in resources["states:StopExecution"]
     params = resources["ssm:GetParameter"]
     assert "/leaf-al/state-machines/model-release" in params
     assert "/leaf-al/state-machines/al-round" in params
+    assert "/leaf-al/state-machines/al-train" in params
     invoke = resources["lambda:InvokeFunction"]
     assert "StartRoundFn" in invoke and "CancelRoundFn" in invoke
+    assert "StartTrainingFn" in invoke
     assert "GithubActionsRoleArn" in full.to_json()["Outputs"]
 
 

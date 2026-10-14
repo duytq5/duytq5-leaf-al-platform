@@ -76,10 +76,10 @@ def model(conn, dataset_id: int, name: str, version: int, exported: bool = True)
         else (None, None, None, None)
     )
     return conn.execute(
-        "INSERT INTO model_versions (round_id, trained_on_version_id, mlflow_name,"
+        "INSERT INTO model_versions (round_id, dataset_id, trained_on_version_id, mlflow_name,"
         " mlflow_version, mlflow_run_id, arch, train_config, labels,"
         " onnx_s3_key, onnx_sha256, size_bytes, exported_at)"
-        " SELECT %s, base_version_id, %s, %s, 'run', 'fastvit_t8', '{}',"
+        " SELECT %s, dataset_id, base_version_id, %s, %s, 'run', 'fastvit_t8', '{}',"
         """ '[{"code": "a", "display_name": "A"}, {"code": "b", "display_name": "B"}]',"""
         " %s, %s, %s, %s::timestamptz FROM rounds WHERE id = %s RETURNING id",
         (round_id, name, version, *export, round_id),

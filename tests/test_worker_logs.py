@@ -62,6 +62,12 @@ def test_job_fields():
 
     assert "round_id" not in job_fields(Export())
 
+    class Training(_Job):
+        round_id = None
+        training_id = ROUND_ID
+
+    assert job_fields(Training())["training_id"] == str(ROUND_ID)
+
 
 def test_json_lines_carry_the_running_job():
     fmt = JsonFormatter()

@@ -12,7 +12,7 @@ from collections.abc import Callable
 log = logging.getLogger("lambdas")
 log.setLevel(logging.INFO)
 
-IDS = ("round_id", "job_id", "image_id", "dataset", "model", "version", "commit_sha")
+IDS = ("round_id", "training_id", "job_id", "image_id", "dataset", "model", "version", "commit_sha")
 
 
 def traced(handler: Callable) -> Callable:

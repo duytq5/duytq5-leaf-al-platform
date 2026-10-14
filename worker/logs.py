@@ -26,6 +26,8 @@ def job_fields(job) -> dict[str, str]:
     fields = {"job_id": str(job.job_id), "job_type": str(job.type)}
     if job.round_id is not None:
         fields["round_id"] = str(job.round_id)
+    if getattr(job, "training_id", None) is not None:
+        fields["training_id"] = str(job.training_id)
     return fields
 
 

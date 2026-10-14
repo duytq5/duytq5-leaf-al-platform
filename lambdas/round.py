@@ -33,7 +33,7 @@ from psycopg.types.json import Jsonb
 from pydantic import BaseModel, ConfigDict
 
 from common.jobs import JobType, TrainResult, TrainSpec, job_uuid
-from common.round import RoundExecution
+from common.round import RoundExecution, TrainSection
 from common.s3keys import manifest_key, pool_manifest_key, raw_key, scores_key, selection_key
 from lambdas.logs import traced
 from lambdas.postgres import open_db
@@ -191,6 +191,27 @@ def _train_job(
     conn: psycopg.Connection, store: S3Store, run: RoundExecution, rnd: Round
 ) -> dict[str, Any]:
     """The base version's manifest and the train job's spec."""
+    return {
+        "job_id": str(job_uuid(run.round_id, JobType.TRAIN)),
+        "spec": train_spec(
+            conn, store, run.train, rnd.dataset_id, rnd.dataset, rnd.base_version_id,
+            rnd.base_version,
+        ).model_dump(mode="json"),
+    }  # fmt: skip
+
+
+def train_spec(
+    conn: psycopg.Connection,
+    store: S3Store,
+    train: TrainSection,
+    dataset_id: int,
+    dataset: str,
+    version_id: int,
+    version: int,
+) -> TrainSpec:
+    """Write the version's manifest (its labeled images, all splits: the worker
+    trains on train, picks the checkpoint on val and reports test) and return
+    the train job's spec. Also used by standalone trainings (lambdas/training.py)."""
     labeled = conn.execute(
         """
         SELECT i.id, i.sha256, i.split, c.code
@@ -201,11 +222,11 @@ def _train_job(
         WHERE v.version_id = %s
         ORDER BY i.id
         """,
-        (rnd.base_version_id,),
+        (version_id,),
     ).fetchall()
     if not any(split == "train" for _, _, split, _ in labeled):
-        raise RoundError(f"version v{rnd.base_version} has no labeled train images")
-    manifest = manifest_key(rnd.dataset, rnd.base_version)
+        raise RoundError(f"version v{version} has no labeled train images")
+    manifest = manifest_key(dataset, version)
     store.put(
         manifest,
         _parquet(
@@ -213,7 +234,7 @@ def _train_job(
                 {
                     "image_id": [r[0] for r in labeled],
                     "sha256": [r[1] for r in labeled],
-                    "key": [raw_key(rnd.dataset, r[1]) for r in labeled],
+                    "key": [raw_key(dataset, r[1]) for r in labeled],
                     "split": [r[2] for r in labeled],
                     "class_code": [r[3] for r in labeled],
                 }
@@ -222,18 +243,14 @@ def _train_job(
     )
     conn.execute(
         "UPDATE dataset_versions SET manifest_uri = %s WHERE id = %s AND manifest_uri IS NULL",
-        (store.uri(manifest), rnd.base_version_id),
+        (store.uri(manifest), version_id),
     )
-    train = TrainSpec(
-        **run.train.model_dump(),
-        dataset=rnd.dataset,
+    return TrainSpec(
+        **train.model_dump(),
+        dataset=dataset,
         manifest_uri=store.uri(manifest),
-        classes=_classes(conn, rnd.dataset_id),
+        classes=_classes(conn, dataset_id),
     )
-    return {
-        "job_id": str(job_uuid(run.round_id, JobType.TRAIN)),
-        "spec": train.model_dump(mode="json"),
-    }
 
 
 def read_scores(body: bytes) -> PoolData:
@@ -337,12 +354,14 @@ def merge(
         if run.train is not None:
             conn.execute(
                 """
-                INSERT INTO model_versions (round_id, trained_on_version_id, mlflow_name,
-                    mlflow_version, mlflow_run_id, arch, train_config, labels, metrics)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                INSERT INTO model_versions (round_id, dataset_id, trained_on_version_id,
+                    mlflow_name, mlflow_version, mlflow_run_id, arch, train_config, labels,
+                    metrics)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 """,
                 (
                     run.round_id,
+                    rnd.dataset_id,
                     rnd.base_version_id,
                     result.mlflow_name,
                     result.mlflow_version,

@@ -74,6 +74,8 @@ from infra import lambda_code
 from infra.logs import kebab, lambda_logging, log_group, saved_queries
 from infra.stacks.al_round import STATE_MACHINE_NAME as ROUND_STATE_MACHINE
 from infra.stacks.al_round import AlRound
+from infra.stacks.al_train import STATE_MACHINE_NAME as TRAIN_STATE_MACHINE
+from infra.stacks.al_train import AlTrain
 from infra.stacks.model_release import STATE_MACHINE_NAME as RELEASE_STATE_MACHINE
 from infra.stacks.model_release import ModelRelease
 
@@ -91,6 +93,7 @@ SSM_POSTGRES_TLS_CA = f"{SSM_PREFIX}/postgres/tls-ca"
 POSTGRES_PASSWORD_SECRET = "leaf-al/postgres-password"
 SSM_AL_ROUND_ARN = f"{SSM_PREFIX}/state-machines/al-round"
 SSM_MODEL_RELEASE_ARN = f"{SSM_PREFIX}/state-machines/model-release"
+SSM_AL_TRAIN_ARN = f"{SSM_PREFIX}/state-machines/al-train"
 # Label Studio settings write-env.sh reads on the host.
 SSM_USER_POOL_ID = f"{SSM_PREFIX}/auth/user-pool-id"
 SSM_LABEL_STUDIO_DOMAIN = f"{SSM_PREFIX}/label-studio/domain"
@@ -213,6 +216,7 @@ class PlatformStack(Stack):
         self._ec2_host()
         self._lambda_network()
         self._al_round()
+        self._al_train()
         self._round_control()
         self._model_release()
         self._github_actions()
@@ -607,18 +611,40 @@ class PlatformStack(Stack):
         )
         CfnOutput(self, "AlRoundStateMachineArn", value=al_round.state_machine.state_machine_arn)
 
-    def _round_control(self) -> None:
-        """The Lambdas the start-round and cancel-round workflows invoke (F3).
-        Fixed names, so the workflows can call them."""
+    def _al_train(self) -> None:
+        """Standalone trainings (design doc change 24)."""
+        al_train = AlTrain(
+            self,
+            "AlTrain",
+            vpc=self.vpc,
+            subnet=self.lambda_subnet,
+            security_group=self.lambda_sg,
+            environment=self._postgres_environment(),
+            data_bucket=self.data_bucket,
+            job_queue=self.job_queue,
+        )
+        self.al_train = al_train
+        arn = al_train.state_machine.state_machine_arn
+        ssm.StringParameter(
+            self, "AlTrainArnParam", parameter_name=SSM_AL_TRAIN_ARN, string_value=arn
+        )
+        CfnOutput(self, "AlTrainStateMachineArn", value=arn)
 
-        def control(construct_id: str, name: str, handler: str) -> lambda_.Function:
+    def _round_control(self) -> None:
+        """The Lambdas the start-round, cancel-round and start-training
+        workflows invoke (F3, change 24). Fixed names, so the workflows can
+        call them."""
+
+        def control(
+            construct_id: str, name: str, handler: str, module: str = "control"
+        ) -> lambda_.Function:
             return lambda_.Function(
                 self,
                 construct_id,
                 function_name=name,
                 runtime=lambda_code.RUNTIME,
                 code=lambda_code.ROUND.code(),
-                handler=f"lambdas.control.{handler}",
+                handler=f"lambdas.{module}.{handler}",
                 timeout=Duration.seconds(60),
                 memory_size=512,
                 vpc=self.vpc,
@@ -634,6 +660,9 @@ class PlatformStack(Stack):
         self.start_round_fn = control("StartRoundFn", "leaf-al-start-round", "start_round_handler")
         self.cancel_round_fn = control(
             "CancelRoundFn", "leaf-al-cancel-round", "cancel_round_handler"
+        )
+        self.start_training_fn = control(
+            "StartTrainingFn", "leaf-al-start-training", "start_training_handler", "training"
         )
         # Cancelling puts the round's selected images back in the pool.
         self.data_bucket.grant_read(self.cancel_round_fn, "selections/*")
@@ -711,10 +740,16 @@ class PlatformStack(Stack):
         # Rounds: start-round inserts the round, the workflow starts al-round
         # (the Lambda has no route to Step Functions); cancel-round stops it.
         self.al_round.state_machine.grant_start_execution(role)
+        # Trainings (change 24): start-training inserts it, the workflow starts al-train.
+        self.al_train.state_machine.grant_start_execution(role)
         role.add_to_policy(
             iam.PolicyStatement(
                 actions=["states:DescribeExecution"],
-                resources=[executions(RELEASE_STATE_MACHINE), executions(ROUND_STATE_MACHINE)],
+                resources=[
+                    executions(RELEASE_STATE_MACHINE),
+                    executions(ROUND_STATE_MACHINE),
+                    executions(TRAIN_STATE_MACHINE),
+                ],
             )
         )
         role.add_to_policy(
@@ -722,7 +757,7 @@ class PlatformStack(Stack):
                 actions=["states:StopExecution"], resources=[executions(ROUND_STATE_MACHINE)]
             )
         )
-        for fn in (self.start_round_fn, self.cancel_round_fn):
+        for fn in (self.start_round_fn, self.cancel_round_fn, self.start_training_fn):
             fn.grant_invoke(role)
         role.add_to_policy(
             iam.PolicyStatement(
@@ -730,6 +765,7 @@ class PlatformStack(Stack):
                 resources=[
                     self._param_arn(SSM_MODEL_RELEASE_ARN),
                     self._param_arn(SSM_AL_ROUND_ARN),
+                    self._param_arn(SSM_AL_TRAIN_ARN),
                 ],
             )
         )

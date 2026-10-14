@@ -344,3 +344,33 @@ def test_s3_keys():
     assert s3keys.raw_key("durian", SHA) == f"raw/durian/{SHA}.jpg"
     assert s3keys.manifest_key("rocole", 3) == "manifests/rocole/v3.parquet"
     assert s3keys.edge_manifest_key("leaf-disease", 13) == "edge/leaf-disease/13/manifest.json"
+
+
+def test_a_train_job_belongs_to_a_round_or_a_training():
+    """Change 24: al-train sends train jobs with a training_id instead."""
+    job = _train()
+    del job["round_id"]
+    job["training_id"] = str(uuid4())
+    parsed = parse_job(json.dumps(job))
+    assert parsed.round_id is None and str(parsed.training_id) == job["training_id"]
+    for bad in ({**job, "round_id": str(uuid4())}, {k: v for k, v in job.items()
+                                                    if k != "training_id"}):  # fmt: skip
+        with pytest.raises(ValidationError):
+            parse_job(json.dumps(bad))
+
+
+def test_training_config():
+    from common.training import TrainingConfig
+
+    cfg = TrainingConfig.model_validate(
+        {"dataset": "rocole", "train": {"recipe": "timm_classifier", "params": {"epochs": 5}}}
+    )
+    assert cfg.version is None and cfg.train.base_model is None  # the latest version
+    assert TrainingConfig.from_yaml(ROOT / "configs/examples/training.yaml").dataset == "rocole"
+    for bad in (
+        {"dataset": "rocole"},
+        {"dataset": "rocole", "train": {"recipe": "x"}, "selection": {}},
+        {"dataset": "rocole", "train": {"recipe": "x"}, "version": -1},
+    ):
+        with pytest.raises(ValidationError):
+            TrainingConfig.model_validate(bad)

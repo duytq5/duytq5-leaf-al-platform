@@ -41,8 +41,7 @@ _EXISTING = """
 _MODEL = """
     SELECT mv.id, mv.labels
       FROM model_versions mv
-      JOIN rounds r ON r.id = mv.round_id
-     WHERE mv.mlflow_name = %s AND mv.mlflow_version = %s AND r.dataset_id = %s
+     WHERE mv.mlflow_name = %s AND mv.mlflow_version = %s AND mv.dataset_id = %s
 """
 
 _RECENT = """

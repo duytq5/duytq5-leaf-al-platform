@@ -125,9 +125,9 @@ def _model(conn, version: int) -> None:
         (rid, COMMIT),
     )
     conn.execute(
-        "INSERT INTO model_versions (round_id, trained_on_version_id, mlflow_name,"
+        "INSERT INTO model_versions (round_id, dataset_id, trained_on_version_id, mlflow_name,"
         " mlflow_version, mlflow_run_id, arch, train_config, labels)"
-        " SELECT %s, id, 'toy', %s, 'run', 'fastvit_t8', '{}',"
+        " SELECT %s, dataset_id, id, 'toy', %s, 'run', 'fastvit_t8', '{}',"
         ' \'[{"code": "a"}, {"code": "b"}]\' FROM dataset_versions WHERE version = 0',
         (rid, version),
     )
