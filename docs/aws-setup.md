@@ -605,12 +605,18 @@ aws sqs start-message-move-task --source-arn $(aws sqs get-queue-attributes --qu
 ## 7. GitHub Actions (the ops repo)
 
 Rounds and releases are run from a separate repo, the ops repo
-(`duytq5/active-learning-operation` unless you deploy with `-c opsRepo=owner/name`).
+(`duytq5/active-learning-operation` unless you deploy with `-c opsRepoSub=...`).
 It holds `configs/rounds/`, `configs/releases/` and the workflows that act on
 them; this repo holds the code. The ops repo's workflows reach AWS with
 GitHub's OIDC token and the IAM role `leaf-al-github-actions`; no AWS keys are
 stored in GitHub. Only runs on `main` of the ops repo may assume the role, so
-pull requests never get AWS access, and nothing in this repo does. After the
+pull requests never get AWS access, and nothing in this repo does. The role
+knows the ops repo by GitHub's immutable OIDC subject, which holds the owner
+and repo ids (`OPS_REPO_SUB` in `infra/stacks/platform.py`). A new repo with
+the same name gets other ids, so it cannot assume the role. Read a repo's
+subject with
+`gh api repos/<owner>/<name>/actions/oidc/customization/sub` (`sub_claim_prefix`).
+For another ops repo, deploy with `-c opsRepoSub=<that prefix>`. After the
 deploy that adds the role, store its ARN as a variable of the ops repo (not a
 secret; it names the role, it grants nothing):
 
@@ -620,6 +626,10 @@ gh variable set AWS_ROLE_ARN --repo duytq5/active-learning-operation --body "$RO
 ```
 
 (or the ops repo on GitHub, Settings, Secrets and variables, Actions, Variables tab.)
+
+If a workflow fails with `Not authorized to perform
+sts:AssumeRoleWithWebIdentity`, the role and the repo disagree on the subject.
+Compare the `sub_claim_prefix` above with `OPS_REPO_SUB` (or `opsRepoSub`).
 
 If `cdk deploy` fails with `EntityAlreadyExists` on the OIDC provider, the
 account already has one for GitHub; reuse it:
