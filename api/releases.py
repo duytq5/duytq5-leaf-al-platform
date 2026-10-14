@@ -7,10 +7,9 @@ the model it has.
 """
 
 CURRENT_MODELS = """
-    SELECT DISTINCT ON (r.dataset_id)
-           r.dataset_id, mv.mlflow_name, mv.mlflow_version, mv.onnx_sha256
+    SELECT DISTINCT ON (mv.dataset_id)
+           mv.dataset_id, mv.mlflow_name, mv.mlflow_version, mv.onnx_sha256
       FROM model_releases mr
       JOIN model_versions mv ON mv.id = mr.model_version_id
-      JOIN rounds r ON r.id = mv.round_id
-     ORDER BY r.dataset_id, mr.released_at DESC, mr.id DESC
+     ORDER BY mv.dataset_id, mr.released_at DESC, mr.id DESC
 """

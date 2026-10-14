@@ -96,12 +96,13 @@ def durian(db):
     _label(db, ids[3], a, r2)
     # The app's guess for image 5, from the capture it came with.
     model = db.execute(
-        "INSERT INTO model_versions (round_id, trained_on_version_id, mlflow_name,"
+        "INSERT INTO model_versions (round_id, dataset_id, trained_on_version_id, mlflow_name,"
         " mlflow_version, mlflow_run_id, arch, train_config, labels)"
-        " VALUES (%s, %s, 'durian-fastvit', 1, 'run', 'fastvit_t8', '{}',"
-        """ '[{"code": "a", "display_name": "A"}, {"code": "b", "display_name": "B"}]')"""
+        " SELECT %s, dataset_id, %s, 'durian-fastvit', 1, 'run', 'fastvit_t8', '{}',"
+        """ '[{"code": "a", "display_name": "A"}, {"code": "b", "display_name": "B"}]'"""
+        " FROM rounds WHERE id = %s"
         " RETURNING id",
-        (r1, v0),
+        (r1, v0, r1),
     ).fetchone()[0]
     db.execute(
         "INSERT INTO captures (capture_id, image_id, dataset_id, sha256, user_sub,"

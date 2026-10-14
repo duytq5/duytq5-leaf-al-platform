@@ -324,6 +324,7 @@ def test_every_table_has_an_id_primary_key(conn):
             "model_versions",
             "model_releases",
             "captures",
+            "trainings",
         )
     }
 
@@ -513,9 +514,10 @@ def test_seed_refuses_to_change_v0_once_a_round_used_it(conn, tmp_path):
 
 def _model(conn, round_id, mlflow_version: int = 1) -> int:
     return conn.execute(
-        "INSERT INTO model_versions (round_id, trained_on_version_id, mlflow_name,"
+        "INSERT INTO model_versions (round_id, dataset_id, trained_on_version_id, mlflow_name,"
         " mlflow_version, mlflow_run_id, arch, train_config, labels)"
-        " SELECT id, base_version_id, 'leaf-disease', %s, 'run', 'fastvit_t8', '{}', %s"
+        " SELECT id, dataset_id, base_version_id, 'leaf-disease', %s, 'run', 'fastvit_t8',"
+        " '{}', %s"
         " FROM rounds WHERE id = %s RETURNING id",
         (mlflow_version, Jsonb(SNAPSHOT), round_id),
     ).fetchone()[0]
@@ -613,3 +615,57 @@ def test_rounds_record_their_scoring_model(conn):
         " WHERE table_name = 'rounds' AND column_name = 'score_model'"
     ).fetchone()
     assert nullable == "YES"
+
+
+def test_a_model_comes_from_a_round_or_a_training(conn):
+    """Change 24, migration 0005: trainings; model_versions names its dataset
+    and exactly one of round_id / training_id."""
+    columns = dict(
+        conn.execute(
+            "SELECT column_name, is_nullable FROM information_schema.columns"
+            " WHERE table_name = 'model_versions'"
+        ).fetchall()
+    )
+    assert columns["dataset_id"] == "NO"
+    assert columns["round_id"] == "YES" and columns["training_id"] == "YES"
+    (check,) = conn.execute(
+        "SELECT pg_get_constraintdef(oid) FROM pg_constraint"
+        " WHERE conname = 'model_versions_one_source'"
+    ).fetchone()
+    assert "num_nonnulls(round_id, training_id) = 1" in check
+    trainings = {
+        r[0]
+        for r in conn.execute(
+            "SELECT column_name FROM information_schema.columns WHERE table_name = 'trainings'"
+        )
+    }
+    assert {"id", "dataset_id", "version_id", "train_config", "status", "started_by",
+            "commit_sha", "finished_at"} <= trainings  # fmt: skip
+
+
+def test_migration_0005_fills_dataset_id_of_round_models(pg_url):
+    """Models trained before change 24 get their round's dataset."""
+    with connect(pg_url) as c:
+        with c.transaction():
+            c.execute(
+                "CREATE TABLE schema_migrations ("
+                " name text PRIMARY KEY, applied_at timestamptz NOT NULL DEFAULT now())"
+            )
+            for path in migration_files():
+                if path.name >= "0005":
+                    break
+                c.execute(path.read_text(encoding="utf-8"))
+                c.execute("INSERT INTO schema_migrations (name) VALUES (%s)", (path.name,))
+        _image(c, "train", "unlabeled")
+        rid = _round(c)
+        c.execute(
+            "INSERT INTO model_versions (round_id, trained_on_version_id, mlflow_name,"
+            " mlflow_version, mlflow_run_id, arch, train_config, labels)"
+            " SELECT id, base_version_id, 'leaf-disease', 1, 'run', 'fastvit_t8', '{}', %s"
+            " FROM rounds WHERE id = %s",
+            (Jsonb(SNAPSHOT), rid),
+        )
+        assert "0005_trainings.sql" in migrate(c)
+        (dataset,) = c.execute("SELECT d.name FROM model_versions mv"
+                               " JOIN datasets d ON d.id = mv.dataset_id").fetchone()  # fmt: skip
+        assert dataset == "toy"

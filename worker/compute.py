@@ -282,7 +282,8 @@ def run_train(job: TrainJob, env: WorkerEnv) -> dict:
     model = recipe.build_model(len(codes), base).to(env.device)
 
     mlflow.set_experiment(f"leaf-al-{spec.dataset}")
-    with mlflow.start_run(run_name=f"round-{job.round_id}") as run:
+    run_name = f"round-{job.round_id}" if job.round_id else f"training-{job.training_id}"
+    with mlflow.start_run(run_name=run_name) as run:
         mlflow.set_tags(_tags(job, recipe, env))
         mlflow.log_params({"recipe": spec.recipe, **p.model_dump(mode="json")})
         best: dict = {"f1": -1.0}
@@ -322,13 +323,16 @@ def _tags(job: TrainJob, recipe: TrainRecipe, env: WorkerEnv) -> dict[str, str]:
     spec = job.spec
     tags = {
         "job_id": str(job.job_id),
-        "round_id": str(job.round_id),
         "dataset": spec.dataset,
         "manifest_uri": spec.manifest_uri,
         "recipe": spec.recipe,
         "recipe_params": recipe.params.model_dump_json(),
         "git_sha": env.git_sha,
     }
+    if job.round_id:
+        tags["round_id"] = str(job.round_id)
+    if job.training_id:
+        tags["training_id"] = str(job.training_id)
     if spec.base_model:
         tags["base_model"] = spec.base_model
     return tags

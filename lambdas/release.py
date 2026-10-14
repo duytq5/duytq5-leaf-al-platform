@@ -34,10 +34,11 @@ class ReleaseError(RuntimeError):
 
 
 _VERSION = """
-    SELECT mv.id, mv.labels, mv.onnx_sha256, r.commit_sha
+    SELECT mv.id, mv.labels, mv.onnx_sha256, coalesce(r.commit_sha, t.commit_sha)
       FROM model_versions mv
-      JOIN rounds r ON r.id = mv.round_id
-      JOIN datasets d ON d.id = r.dataset_id
+      LEFT JOIN rounds r ON r.id = mv.round_id
+      LEFT JOIN trainings t ON t.id = mv.training_id
+      JOIN datasets d ON d.id = mv.dataset_id
      WHERE d.name = %s AND mv.mlflow_name = %s AND mv.mlflow_version = %s
 """
 
@@ -45,8 +46,7 @@ _CURRENT = """
     SELECT mr.model_version_id
       FROM model_releases mr
       JOIN model_versions mv ON mv.id = mr.model_version_id
-      JOIN rounds r ON r.id = mv.round_id
-     WHERE r.dataset_id = %s
+     WHERE mv.dataset_id = %s
      ORDER BY mr.released_at DESC, mr.id DESC
      LIMIT 1
 """

@@ -70,9 +70,8 @@ def _validate(ev: StartRound):
 def _newest_model(conn: psycopg.Connection, dataset_id: int) -> str | None:
     row = conn.execute(
         """
-        SELECT mv.mlflow_name, mv.mlflow_version FROM model_versions mv
-          JOIN rounds r ON r.id = mv.round_id
-         WHERE r.dataset_id = %s ORDER BY mv.created_at DESC, mv.id DESC LIMIT 1
+        SELECT mlflow_name, mlflow_version FROM model_versions
+         WHERE dataset_id = %s ORDER BY created_at DESC, id DESC LIMIT 1
         """,
         (dataset_id,),
     ).fetchone()

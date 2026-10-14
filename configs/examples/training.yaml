@@ -1,0 +1,11 @@
+# One standalone training (design doc change 24). Training files live in the
+# ops repo (configs/trainings/); merging one there to main trains a model on
+# the dataset's labels, with no round. Rounds without a `train` section then
+# score with the newest model.
+# Check this file:  uv run al check-training configs/examples/training.yaml
+dataset: rocole
+# version: 3  # dataset version to train on; default: the latest
+train:
+  recipe: timm_classifier
+  params: {epochs: 20}
+  # base_model: models:/rocole-fastvit@champion  # fine-tune from a registered model

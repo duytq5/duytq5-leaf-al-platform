@@ -58,6 +58,33 @@ def cmd_check_round(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_check_training(args: argparse.Namespace) -> int:
+    """Validate a training config (design doc change 24): its dataset and
+    recipe params, like check-round."""
+    from common.training import TrainingConfig
+
+    try:
+        cfg = TrainingConfig.from_yaml(args.config)
+        recipe = get_recipe(cfg.train.recipe, cfg.train.params)
+    except KeyError as e:
+        print(e.args[0])
+        return 1
+    except (OSError, ValidationError) as e:
+        print(e)
+        return 1
+    dataset = Path(args.datasets) / f"{cfg.dataset}.yaml"
+    if not dataset.is_file():
+        print(f"no dataset {cfg.dataset} ({dataset} does not exist)")
+        return 1
+    version = "latest version" if cfg.version is None else f"v{cfg.version}"
+    print(
+        f"ok: training on {cfg.dataset} {version}"
+        f", recipe={recipe.name} params={recipe.params.model_dump()}"
+        f" base_model={cfg.train.base_model or 'none'}"
+    )
+    return 0
+
+
 def cmd_check_release(args: argparse.Namespace) -> int:
     """Validate every configs/releases/{dataset}.yaml (run from the ops repo
     root; --datasets points at the platform checkout's dataset configs)."""
@@ -215,12 +242,18 @@ def main(argv: list[str] | None = None) -> int:
     check = sub.add_parser("check-round", help="validate a round config YAML")
     check.add_argument("config")
     check.add_argument("--datasets", default="configs/datasets", help="folder of dataset configs")
+    check_training = sub.add_parser("check-training", help="validate a training config YAML")
+    check_training.add_argument("config")
+    check_training.add_argument(
+        "--datasets", default="configs/datasets", help="folder of dataset configs"
+    )
     check_release = sub.add_parser("check-release", help="validate configs/releases/*.yaml")
     check_release.add_argument(
         "--datasets", default="configs/datasets", help="folder of dataset configs"
     )
     round_input = sub.add_parser(
-        "round-input", help="print the start-round input for a round config"
+        "round-input",
+        help="print the start-round (or start-training) input for a round (or training) config",
     )
     round_input.add_argument("file", help="configs/rounds/<name>.yaml")
     round_input.add_argument("--started-by", required=True, help="GitHub login of the merger")
@@ -265,6 +298,7 @@ def main(argv: list[str] | None = None) -> int:
         "strategies": cmd_strategies,
         "recipes": cmd_recipes,
         "check-round": cmd_check_round,
+        "check-training": cmd_check_training,
         "check-release": cmd_check_release,
         "release-input": cmd_release_input,
         "round-input": cmd_round_input,

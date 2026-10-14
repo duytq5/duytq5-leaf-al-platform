@@ -4,7 +4,9 @@
  "task_token": str, "round_id": uuid | null, "spec": {...}}
 
 train and score come from the al-round state machine, export from the
-model-release state machine; all three carry a task token. `image` is the
+model-release state machine; all three carry a task token. A train job from
+the al-train state machine (a standalone training, design doc change 24) has
+"training_id" instead of "round_id". `image` is the
 worker image built for the commit that started the round or release; the
 worker runs the job in it.
 
@@ -20,7 +22,7 @@ from enum import StrEnum
 from typing import Annotated, Literal
 from uuid import UUID, uuid5
 
-from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, field_validator
+from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, field_validator, model_validator
 
 from common.manifest import ClassList
 from common.round import TrainSection
@@ -28,7 +30,8 @@ from common.types import DatasetName, WorkerImage
 
 
 def job_uuid(round_id: UUID, job_type: "JobType") -> UUID:
-    """The job id of a round's train or score job: the same on every retry."""
+    """The job id of a round's (or a training's) train or score job: the same
+    on every retry."""
     return uuid5(round_id, str(job_type))
 
 
@@ -81,8 +84,15 @@ class _JobBase(_Strict):
 
 class TrainJob(_JobBase):
     type: Literal[JobType.TRAIN] = JobType.TRAIN
-    round_id: UUID
+    round_id: UUID | None = None
+    training_id: UUID | None = None
     spec: TrainSpec
+
+    @model_validator(mode="after")
+    def _round_or_training(self) -> "TrainJob":
+        if (self.round_id is None) == (self.training_id is None):
+            raise ValueError("a train job has either round_id or training_id")
+        return self
 
 
 class ScoreJob(_JobBase):
