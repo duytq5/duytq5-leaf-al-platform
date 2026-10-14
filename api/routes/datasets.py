@@ -14,6 +14,8 @@ from api.deps import get_db
 from common.admin import (
     DatasetVersion,
     DatasetVersionsResponse,
+    LastRound,
+    PoolSummary,
     VersionItem,
     VersionItemsResponse,
 )
@@ -58,6 +60,25 @@ _ITEMS = """
      WHERE dvl.version_id = %s AND dvl.image_id > %s
      ORDER BY dvl.image_id
      LIMIT %s
+"""
+
+_LAST_ROUND = """
+    SELECT id, status, created_at FROM rounds
+     WHERE dataset_id = %s
+     ORDER BY created_at DESC
+     LIMIT 1
+"""
+
+# Only train images can be in the pool (val and test stay labeled).
+_POOL = """
+    SELECT count(*) FILTER (WHERE status = 'unlabeled'),
+           count(*) FILTER (WHERE status = 'unlabeled' AND source = 'edge'),
+           count(*) FILTER (WHERE status = 'unlabeled'
+                              AND (%(since)s::timestamptz IS NULL OR created_at > %(since)s)),
+           count(*) FILTER (WHERE status = 'queued'),
+           count(*) FILTER (WHERE status = 'rejected')
+      FROM images
+     WHERE dataset_id = %(dataset)s AND split = 'train'
 """
 
 
@@ -131,4 +152,41 @@ def version_items(
         version=version,
         items=items,
         next_cursor=str(page[-1][0]) if more else None,
+    )
+
+
+@router.get("/v1/datasets/{name}/pool")
+def pool(
+    name: DatasetName,
+    _: Annotated[User, Depends(require_groups("admins"))],
+    db: Annotated[psycopg.Connection, Depends(get_db)],
+) -> PoolSummary:
+    """Labeled and unlabeled counts, to decide whether a new round is worth starting."""
+    dataset_id = _dataset_id(db, name)
+    counts: dict[int, dict[str, int]] = {}
+    for version_id, code, n in db.execute(_COUNTS, {"dataset": dataset_id}):
+        counts.setdefault(version_id, {})[code] = n
+    version_id, version = db.execute(
+        "SELECT id, version FROM dataset_versions WHERE dataset_id = %s"
+        " ORDER BY version DESC LIMIT 1",
+        (dataset_id,),
+    ).fetchone()
+    label_counts = counts.get(version_id, {})
+    last = db.execute(_LAST_ROUND, (dataset_id,)).fetchone()
+    unlabeled, uploads, new, queued, rejected = db.execute(
+        _POOL, {"dataset": dataset_id, "since": last[2] if last else None}
+    ).fetchone()
+    return PoolSummary(
+        dataset=name,
+        latest_version=version,
+        labeled=sum(label_counts.values()),
+        label_counts=label_counts,
+        unlabeled=unlabeled,
+        unlabeled_uploads=uploads,
+        new_since_last_round=new,
+        queued=queued,
+        rejected=rejected,
+        last_round=LastRound(round_id=last[0], status=last[1], created_at=last[2])
+        if last
+        else None,
     )
