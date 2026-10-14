@@ -3,8 +3,9 @@
 # (behind Caddy and oauth2-proxy) and the nightly backup. First boot runs it
 # from user data; `scripts/ec2.sh setup` runs it on an existing instance.
 # Safe to run again: .env is rewritten from SSM, compose only recreates what
-# changed, Postgres restarts only for a new certificate, the Label Studio
-# database is created once, the cron line is replaced.
+# changed, Postgres restarts only for a new certificate, Caddy only for a new
+# Caddyfile, the Label Studio database is created once, the cron line is
+# replaced.
 set -eu
 REGION="${AWS_REGION:?set AWS_REGION}"
 HERE="$(cd "$(dirname "$0")" && pwd)"
@@ -29,6 +30,13 @@ if [ "$(psql_al "SELECT 1 FROM pg_database WHERE datname = 'labelstudio'")" != "
   psql_al "CREATE DATABASE labelstudio"
 fi
 docker compose up -d --build
+# Caddy reads its Caddyfile only when it starts, and compose does not recreate
+# it for a new one, so restart it once after git brought a new Caddyfile.
+caddyfile="$(sha256sum caddy/Caddyfile | cut -d' ' -f1)"
+if [ "$(cat caddy/.running 2>/dev/null || true)" != "$caddyfile" ]; then
+  docker compose restart caddy
+  echo "$caddyfile" > caddy/.running
+fi
 
 line="0 3 * * * $HERE/backup-postgres.sh >> $LOG 2>&1"
 others="$(crontab -l 2>/dev/null | grep -vF backup-postgres.sh || true)"

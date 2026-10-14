@@ -21,6 +21,14 @@ jobs:
           cp deploy/ec2/.env.example deploy/ec2/.env
           docker compose -f deploy/ec2/docker-compose.yml config -q
           docker compose -f deploy/ec2/docker-compose.yml -f deploy/ec2/docker-compose.logs.yml config -q
+      # The Label Studio guard tests run the real Caddy, taken from the image
+      # the EC2 host runs.
+      - name: Install Caddy
+        run: |
+          id="$(docker create caddy:2.11.7-alpine)"
+          sudo docker cp "$id:/usr/bin/caddy" /usr/local/bin/caddy
+          docker rm "$id"
+          caddy version
       # Database tests run against the real compose Postgres, with the same
       # TLS settings and pg_hba.conf as on EC2.
       - name: Start Postgres with TLS

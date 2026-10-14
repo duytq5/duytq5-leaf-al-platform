@@ -120,3 +120,33 @@ def test_write_env_refuses_a_partial_label_studio_secret(tmp_path):
         STUBS.update(STUBS_SAVED)
     assert proc.returncode != 0
     assert "webhook_secret" in proc.stderr
+
+
+def test_caddy_restarts_only_when_its_caddyfile_changed(tmp_path):
+    """Compose does not recreate Caddy for a new Caddyfile (a bind mount, and
+    git replaces the file), and Caddy reads it only at start."""
+    for _ in range(2):
+        proc, repo, _ = run(tmp_path)
+        assert proc.returncode == 0, proc.stderr
+    calls = (tmp_path / "calls.log").read_text()
+    assert calls.count("docker compose restart caddy") == 1  # same file the 2nd time
+    assert calls.index("docker compose up -d --build") < calls.index("docker compose restart caddy")
+
+    caddyfile = repo / "deploy" / "ec2" / "caddy" / "Caddyfile"
+    caddyfile.write_text(caddyfile.read_text() + "\n# changed\n")
+    (tmp_path / "calls.log").write_text("")
+    proc = subprocess.run(
+        ["sh", str(repo / "deploy" / "ec2" / "bootstrap.sh")],
+        env={
+            **os.environ,
+            "PATH": f"{tmp_path / 'bin'}:{os.environ['PATH']}",
+            "AWS_REGION": "ap-southeast-2",
+            "CALLS": str(tmp_path / "calls.log"),
+            "CRON": str(tmp_path / "crontab"),
+        },
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert "docker compose restart caddy" in (tmp_path / "calls.log").read_text()

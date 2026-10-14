@@ -42,3 +42,6 @@ mlartifacts/
 # copy a client downloads from SSM
 deploy/ec2/tls/
 *.crt
+
+# Hash of the Caddyfile Caddy last started with (bootstrap.sh)
+deploy/ec2/caddy/.running

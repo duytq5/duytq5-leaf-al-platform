@@ -12,3 +12,21 @@
 	encode gzip
 	reverse_proxy viewer-gate:4180
 }
+
+# Label Studio guard, reached only by oauth2-proxy over the compose network
+# (port 8081 is not published). Label Studio Community has no roles, so every
+# labeler could create, change or delete projects; this refuses that to anyone
+# not in the Cognito `admins` group. oauth2-proxy sets X-Forwarded-Groups from
+# the Cognito token and drops any value the browser sent. Annotating, drafts
+# and the label stream stay open. The label step Lambdas call label-studio:8080
+# directly and never come through here.
+http://:8081 {
+	@manage_projects {
+		not header_regexp X-Forwarded-Groups `(^|,)\s*admins\s*(,|$)`
+		not method GET HEAD OPTIONS
+		path /api/projects /api/projects/* /api/import /api/import/* /api/storages /api/storages/* /api/webhooks /api/webhooks/*
+	}
+	respond @manage_projects "Only admins can create, change or delete projects." 403
+
+	reverse_proxy label-studio:8080
+}
