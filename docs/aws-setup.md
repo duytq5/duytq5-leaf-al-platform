@@ -397,8 +397,21 @@ in a `labelstudio` database (so the nightly backup covers it). The way in:
 ```
 browser -> https://<LabelStudioUrl> (Caddy, Let's Encrypt)
         -> oauth2-proxy: Cognito sign-in, only groups labelers and admins
+        -> Caddy guard (:8081, internal): project management for admins only
         -> Label Studio sign-in with the person's own Label Studio account
 ```
+
+Label Studio Community has no roles, so on its own every labeler could create,
+change or delete projects. The guard stops that: for anyone not in the Cognito
+`admins` group it answers 403 to any write (POST, PUT, PATCH, DELETE) on
+`/api/projects`, `/api/import`, `/api/storages` and `/api/webhooks`, so
+labelers cannot create a project, change its settings, import tasks or delete
+it. Annotating, drafts and the label stream stay open. In the Label Studio
+page a labeler still sees the Create button; it fails with "Only admins can
+create, change or delete projects." oauth2-proxy sends the groups in
+`X-Forwarded-Groups` and drops any value the browser sent; port 8081 is not
+published. The label step Lambdas call Label Studio on port 8080 directly, so
+rounds are not affected.
 
 Two sign-ins, on purpose (design doc decision 2026-10-05): Label Studio
 Community has no SSO. `scripts/ec2.sh setup` (section 3) starts it all after
