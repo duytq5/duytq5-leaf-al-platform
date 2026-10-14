@@ -10,6 +10,10 @@
 # macOS (LibreSSL). Hence the CA + v3 server certificate. The CA key is not
 # kept: to change anything, run this again and replace all three parameters.
 #
+# LibreSSL also writes EC keys with explicit curve parameters by default, which
+# OpenSSL 3 (libpq, psycopg) rejects under verify-full. ec_param_enc:named_curve
+# asks for the named P-256 curve, and the check at the end fails if it didn't.
+#
 # For local development, run it with no argument to write ./tls/.
 set -eu
 out="${1:-$(dirname "$0")/tls}"
@@ -35,14 +39,24 @@ authorityKeyIdentifier = keyid
 subjectKeyIdentifier = hash
 EOF
 
-openssl req -x509 -new -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes \
+openssl req -x509 -new -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 \
+  -pkeyopt ec_param_enc:named_curve -nodes \
   -days 3650 -subj "/CN=leaf-al-postgres-ca" -config "$work/ext.cnf" -extensions ca \
   -keyout "$work/ca.key" -out "$out/ca.crt" 2>/dev/null
-openssl req -new -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes \
+openssl req -new -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 \
+  -pkeyopt ec_param_enc:named_curve -nodes \
   -subj "/CN=leaf-al-postgres" -config "$work/ext.cnf" \
   -keyout "$out/server.key" -out "$work/server.csr" 2>/dev/null
 openssl x509 -req -in "$work/server.csr" -CA "$out/ca.crt" -CAkey "$work/ca.key" \
   -set_serial "0x$(openssl rand -hex 16)" -days 3650 \
   -extfile "$work/ext.cnf" -extensions server -out "$out/server.crt" 2>/dev/null
+for cert in ca server; do
+  if ! openssl x509 -in "$out/$cert.crt" -noout -text | grep -q 'ASN1 OID: prime256v1'; then
+    echo "$out/$cert.crt: key has explicit EC parameters, not the named P-256 curve;" \
+      "OpenSSL 3 clients would reject it. Try another openssl (e.g. Homebrew's)." >&2
+    rm -f "$out/ca.crt" "$out/server.crt" "$out/server.key"
+    exit 1
+  fi
+done
 chmod 644 "$out/ca.crt" "$out/server.crt"
 echo "wrote $out/ca.crt, $out/server.crt and $out/server.key"

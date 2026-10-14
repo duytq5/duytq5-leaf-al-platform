@@ -141,6 +141,11 @@ aws ssm put-parameter --overwrite --name /leaf-al/postgres/tls-ca --type String 
 rm -r /tmp/leaf-al-tls
 ```
 
+The keys use the named P-256 curve, which OpenSSL 3 clients (psycopg, the
+Lambdas) require. The script stops with an error if your `openssl` wrote
+explicit curve parameters instead; if that happens, run it again with another
+OpenSSL, for example `PATH="$(brew --prefix openssl@3)/bin:$PATH"` on macOS.
+
 To replace the certificate later (or the old self-signed one from before the
 CA), run the same block, then deploy again (section 2) and run
 `scripts/ec2.sh setup`: the deploy copies the new `tls-ca` into the Lambdas'
