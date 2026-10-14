@@ -490,8 +490,9 @@ def test_only_main_of_the_ops_repo_may_assume_the_github_role(full):
             "token.actions.githubusercontent.com:aud": "sts.amazonaws.com",
             # Not pull requests, other branches or forks: only what merged to
             # main of the ops repo, which holds the round and release files.
+            # GitHub's immutable subject names the owner and repo by id too.
             "token.actions.githubusercontent.com:sub": (
-                "repo:duytq5/active-learning-operation:ref:refs/heads/main"
+                "repo:duytq5@88496947/active-learning-operation@1418488226:ref:refs/heads/main"
             ),
         }
     }
@@ -533,6 +534,13 @@ def test_the_ops_repo_is_a_setting():
     ]
     sub = stmt["Condition"]["StringEquals"]["token.actions.githubusercontent.com:sub"]
     assert sub == "repo:someone/ops:ref:refs/heads/main"
+
+
+def test_the_ops_repo_subject_is_a_setting():
+    template = _template(opsRepoSub="repo:someone@1/ops@2")
+    (stmt,) = _github_role(template)["AssumeRolePolicyDocument"]["Statement"]
+    sub = stmt["Condition"]["StringEquals"]["token.actions.githubusercontent.com:sub"]
+    assert sub == "repo:someone@1/ops@2:ref:refs/heads/main"
 
 
 def test_round_control_lambdas(full):

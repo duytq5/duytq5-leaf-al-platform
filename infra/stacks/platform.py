@@ -127,8 +127,13 @@ DOCKER_BUILDX_VERSION = "v0.17.1"
 GITHUB_REPO = "duytq5/duytq5-leaf-al-platform"
 REPO_URL = f"https://github.com/{GITHUB_REPO}.git"
 # The repo with configs/rounds/ and configs/releases/ and the workflows that
-# act on them; override with `-c opsRepo=owner/name`.
-OPS_REPO = "duytq5/active-learning-operation"
+# act on them (duytq5/active-learning-operation), by GitHub's immutable OIDC
+# subject: owner and repo ids next to the names, so a new repo that takes the
+# name later cannot get the role. Read it with
+# `gh api repos/<owner>/<name>/actions/oidc/customization/sub` (sub_claim_prefix).
+# Another ops repo: `-c opsRepoSub=<its prefix>`, or `-c opsRepo=owner/name`
+# for a repo on the classic, name-only subject.
+OPS_REPO_SUB = "repo:duytq5@88496947/active-learning-operation@1418488226"
 GITHUB_OIDC_HOST = "token.actions.githubusercontent.com"
 GITHUB_ROLE_NAME = "leaf-al-github-actions"
 REPO_DIR = "/home/ec2-user/duytq5-leaf-al-platform"
@@ -660,7 +665,11 @@ class PlatformStack(Stack):
         An account has one OIDC provider per URL: pass `-c
         githubOidcProviderArn=...` to reuse one made outside this stack.
         """
-        ops_repo = self.node.try_get_context("opsRepo") or OPS_REPO
+        ops_repo = self.node.try_get_context("opsRepo")
+        # Another ops repo without its subject: the classic name-only subject.
+        ops_sub = self.node.try_get_context("opsRepoSub") or (
+            f"repo:{ops_repo}" if ops_repo else OPS_REPO_SUB
+        )
         existing = self.node.try_get_context("githubOidcProviderArn")
         if existing:
             provider_arn = existing
@@ -681,7 +690,7 @@ class PlatformStack(Stack):
                 conditions={
                     "StringEquals": {
                         f"{GITHUB_OIDC_HOST}:aud": "sts.amazonaws.com",
-                        f"{GITHUB_OIDC_HOST}:sub": f"repo:{ops_repo}:ref:refs/heads/main",
+                        f"{GITHUB_OIDC_HOST}:sub": f"{ops_sub}:ref:refs/heads/main",
                     }
                 },
             ),
