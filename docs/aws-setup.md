@@ -91,7 +91,8 @@ export CDK_DEFAULT_ACCOUNT=$(aws sts get-caller-identity --query Account --outpu
 | Security group | 80 and 443 from anywhere (Label Studio through Caddy and the Cognito gate); Postgres (5432) and Label Studio's API (8080) from the Lambdas' security group only. You and the worker reach MLflow (5000) and Postgres (5432) through SSM port forwarding (section 3). |
 | Lambda subnet | Private subnet on a second address range (10.1.0.0/24), no internet route; S3 through a free gateway endpoint. |
 | `al-round` state machine + 7 Lambdas | One AL round: mark running, snapshot, train and score jobs on SQS, select, wait for labels (the round's Label Studio project, section 3b), merge; on any error the round is marked failed and its queued images go back to the pool. ARN in SSM `/leaf-al/state-machines/al-round`. Lambda logs kept 30 days. |
-| GitHub Actions role | OIDC provider for `token.actions.githubusercontent.com` and role `leaf-al-github-actions`, assumable only by workflow runs on `main` of the ops repo. It may start and watch `model-release` executions and read its ARN from SSM (section 7). |
+| GitHub Actions role | OIDC provider for `token.actions.githubusercontent.com` and role `leaf-al-github-actions`, assumable only by workflow runs on `main` of the ops repo. It may start and watch `model-release` executions, start, watch and stop `al-round` executions, invoke the two round-control Lambdas and read the state machine ARNs from SSM (section 7). |
+| Round-control Lambdas | `leaf-al-start-round` (validate a round config, insert the round) and `leaf-al-cancel-round` (round cancelled, its selected images back in the pool), invoked by the ops repo's start-round and cancel-round workflows. In the Lambda subnet, like the round Lambdas. |
 | `model-release` state machine + 2 Lambdas | Releases a model version (F5): prepare the export job, wait up to 6 hours for the worker to export ONNX into `edge/` in the models bucket, then record it in `model_releases` (`promote`, or `rollback` for a version released before). ARN in SSM `/leaf-al/state-machines/model-release`. The worker may read and write `edge/` for this. |
 | SSM parameters | `/leaf-al/buckets/data`, `/leaf-al/buckets/models`, `/leaf-al/queues/jobs-url`, and for Label Studio `/leaf-al/auth/user-pool-id`, `/leaf-al/label-studio/domain`, `/leaf-al/label-studio/client-id`. |
 | AWS Budget | Monthly cost budget, email at 80 % actual and 100 % forecast. Only created when `budgetEmail` is set. |
@@ -496,7 +497,7 @@ Cognito signs people in; machines keep IAM. Who belongs where:
 | `labelers` | People labeling in Label Studio | You create the account |
 | `uploaders` | App users who send images | Automatic on their first Google sign-in |
 
-Operators and ML engineers are GitHub roles (CODEOWNERS on the repo), not
+Operators and ML engineers are GitHub roles (CODEOWNERS on the ops repo), not
 Cognito groups.
 
 ### Create an admin or labeler
@@ -589,9 +590,4 @@ account already has one for GitHub; reuse it:
 cdk deploy -c githubOidcProviderArn=arn:aws:iam::<account>:oidc-provider/token.actions.githubusercontent.com
 ```
 
-How to release, roll back and start rounds is in the ops repo's README.
-
-## 8. Later
-
-The GitHub start-round workflow is added by a later PR; this file gets its
-steps when it lands.
+How to start, cancel and release is in the ops repo's README.

@@ -69,6 +69,7 @@ from aws_cdk import aws_ssm as ssm
 from constructs import Construct
 
 from infra import lambda_code
+from infra.stacks.al_round import STATE_MACHINE_NAME as ROUND_STATE_MACHINE
 from infra.stacks.al_round import AlRound
 from infra.stacks.model_release import STATE_MACHINE_NAME as RELEASE_STATE_MACHINE
 from infra.stacks.model_release import ModelRelease
@@ -203,6 +204,7 @@ class PlatformStack(Stack):
         self._ec2_host()
         self._lambda_network()
         self._al_round()
+        self._round_control()
         self._model_release()
         self._github_actions()
         self._budget(ctx("budgetEmail"), float(ctx("budgetUsd") or 20))
@@ -586,6 +588,42 @@ class PlatformStack(Stack):
         )
         CfnOutput(self, "AlRoundStateMachineArn", value=al_round.state_machine.state_machine_arn)
 
+    def _round_control(self) -> None:
+        """The Lambdas the start-round and cancel-round workflows invoke (F3).
+        Fixed names, so the workflows can call them."""
+
+        def control(construct_id: str, name: str, handler: str) -> lambda_.Function:
+            return lambda_.Function(
+                self,
+                construct_id,
+                function_name=name,
+                runtime=lambda_code.RUNTIME,
+                code=lambda_code.ROUND.code(),
+                handler=f"lambdas.control.{handler}",
+                timeout=Duration.seconds(60),
+                memory_size=512,
+                vpc=self.vpc,
+                vpc_subnets=ec2.SubnetSelection(subnets=[self.lambda_subnet]),
+                security_groups=[self.lambda_sg],
+                environment={
+                    **self._postgres_environment(),
+                    "DATA_BUCKET": self.data_bucket.bucket_name,
+                },
+                log_group=logs.LogGroup(
+                    self,
+                    f"{construct_id}Logs",
+                    retention=logs.RetentionDays.ONE_MONTH,
+                    removal_policy=RemovalPolicy.DESTROY,
+                ),
+            )
+
+        self.start_round_fn = control("StartRoundFn", "leaf-al-start-round", "start_round_handler")
+        self.cancel_round_fn = control(
+            "CancelRoundFn", "leaf-al-cancel-round", "cancel_round_handler"
+        )
+        # Cancelling puts the round's selected images back in the pool.
+        self.data_bucket.grant_read(self.cancel_round_fn, "selections/*")
+
     def _model_release(self) -> None:
         release = ModelRelease(
             self,
@@ -641,24 +679,40 @@ class PlatformStack(Stack):
             # The release workflow keeps polling while the worker exports.
             max_session_duration=Duration.hours(7),
         )
-        machine = self.model_release.state_machine
-        machine.grant_start_execution(role)
+
+        def executions(machine_name: str) -> str:
+            return self.format_arn(
+                service="states",
+                resource="execution",
+                resource_name=f"{machine_name}:*",
+                arn_format=ArnFormat.COLON_RESOURCE_NAME,
+            )
+
+        # Releases: start and watch model-release (F5).
+        self.model_release.state_machine.grant_start_execution(role)
+        # Rounds: start-round inserts the round, the workflow starts al-round
+        # (the Lambda has no route to Step Functions); cancel-round stops it.
+        self.al_round.state_machine.grant_start_execution(role)
         role.add_to_policy(
             iam.PolicyStatement(
                 actions=["states:DescribeExecution"],
-                resources=[
-                    self.format_arn(
-                        service="states",
-                        resource="execution",
-                        resource_name=f"{RELEASE_STATE_MACHINE}:*",
-                        arn_format=ArnFormat.COLON_RESOURCE_NAME,
-                    )
-                ],
+                resources=[executions(RELEASE_STATE_MACHINE), executions(ROUND_STATE_MACHINE)],
             )
         )
         role.add_to_policy(
             iam.PolicyStatement(
-                actions=["ssm:GetParameter"], resources=[self._param_arn(SSM_MODEL_RELEASE_ARN)]
+                actions=["states:StopExecution"], resources=[executions(ROUND_STATE_MACHINE)]
+            )
+        )
+        for fn in (self.start_round_fn, self.cancel_round_fn):
+            fn.grant_invoke(role)
+        role.add_to_policy(
+            iam.PolicyStatement(
+                actions=["ssm:GetParameter"],
+                resources=[
+                    self._param_arn(SSM_MODEL_RELEASE_ARN),
+                    self._param_arn(SSM_AL_ROUND_ARN),
+                ],
             )
         )
         CfnOutput(self, "GithubActionsRoleArn", value=role.role_arn)
