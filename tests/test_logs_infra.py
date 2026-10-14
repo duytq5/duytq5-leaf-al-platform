@@ -54,6 +54,8 @@ def test_named_groups_for_each_part_of_the_flow(template):
         "/leaf-al/round/await-labels",
         "/leaf-al/release/prepare",
         "/leaf-al/release/record",
+        "/leaf-al/control/start-round",
+        "/leaf-al/control/cancel-round",
         "/leaf-al/states/al-round",
         "/leaf-al/states/model-release",
     } <= names

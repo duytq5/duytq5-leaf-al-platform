@@ -3,7 +3,7 @@ import logging
 import pytest
 
 import lambdas.round as round_steps
-from lambdas import labeling, release
+from lambdas import control, labeling, release
 from lambdas.logs import traced
 
 ROUND_ID = "0b9e6f9c-6a51-4c7e-9d0f-1f2a3b4c5d6e"
@@ -73,6 +73,8 @@ def test_events_that_are_not_dicts_pass_through(caplog):
         labeling.record_handler,
         release.prepare_handler,
         release.record_handler,
+        control.start_round_handler,
+        control.cancel_round_handler,
     ],
 )
 def test_round_and_release_handlers_are_traced(fn):

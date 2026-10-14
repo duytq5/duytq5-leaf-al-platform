@@ -481,13 +481,31 @@ def test_only_main_of_the_ops_repo_may_assume_the_github_role(full):
     assert role["MaxSessionDuration"] >= 7 * 3600
 
 
-def test_github_role_may_only_run_releases(full):
+def test_github_role_may_only_run_rounds_and_releases(full):
     statements = _statements(full, "GithubActionsRoleDefaultPolicy")
-    actions = {a: json.dumps(s["Resource"]) for s in statements for a in _actions(s)}
-    assert set(actions) == {"states:StartExecution", "states:DescribeExecution", "ssm:GetParameter"}
-    assert "ModelReleaseStateMachine" in actions["states:StartExecution"]
-    assert ":execution:model-release:*" in actions["states:DescribeExecution"]
-    assert "/leaf-al/state-machines/model-release" in actions["ssm:GetParameter"]
+    resources: dict[str, str] = {}
+    for s in statements:
+        for a in _actions(s):
+            resources[a] = resources.get(a, "") + json.dumps(s["Resource"])
+    assert set(resources) == {
+        "states:StartExecution",
+        "states:DescribeExecution",
+        "states:StopExecution",
+        "ssm:GetParameter",
+        "lambda:InvokeFunction",
+    }
+    start = resources["states:StartExecution"]
+    assert "ModelReleaseStateMachine" in start and "AlRoundStateMachine" in start
+    describe = resources["states:DescribeExecution"]
+    assert ":execution:model-release:*" in describe and ":execution:al-round:*" in describe
+    # Cancelling stops a round; releases are never stopped from GitHub.
+    assert ":execution:al-round:*" in resources["states:StopExecution"]
+    assert "model-release" not in resources["states:StopExecution"]
+    params = resources["ssm:GetParameter"]
+    assert "/leaf-al/state-machines/model-release" in params
+    assert "/leaf-al/state-machines/al-round" in params
+    invoke = resources["lambda:InvokeFunction"]
+    assert "StartRoundFn" in invoke and "CancelRoundFn" in invoke
     assert "GithubActionsRoleArn" in full.to_json()["Outputs"]
 
 
@@ -497,6 +515,22 @@ def test_the_ops_repo_is_a_setting():
     ]
     sub = stmt["Condition"]["StringEquals"]["token.actions.githubusercontent.com:sub"]
     assert sub == "repo:someone/ops:ref:refs/heads/main"
+
+
+def test_round_control_lambdas(full):
+    functions = {
+        p["FunctionName"]: p
+        for p in (f["Properties"] for f in full.find_resources("AWS::Lambda::Function").values())
+        if p.get("FunctionName") in ("leaf-al-start-round", "leaf-al-cancel-round")
+    }
+    assert functions["leaf-al-start-round"]["Handler"] == "lambdas.control.start_round_handler"
+    assert functions["leaf-al-cancel-round"]["Handler"] == "lambdas.control.cancel_round_handler"
+    for props in functions.values():
+        assert props["VpcConfig"]["SubnetIds"] == [{"Ref": "LambdaSubnet"}]
+        assert props["Environment"]["Variables"]["PG_HOSTADDR"] == {
+            "Fn::GetAtt": ["HostB4E45AD7", "PrivateIp"]
+        }
+    assert functions["leaf-al-cancel-round"]["Environment"]["Variables"]["DATA_BUCKET"]
 
 
 def test_an_existing_github_oidc_provider_is_reused():

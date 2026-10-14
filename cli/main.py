@@ -96,6 +96,28 @@ def cmd_release_input(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_round_input(args: argparse.Namespace) -> int:
+    """Print the start-round Lambda's input for a round config (the start-round
+    workflow invokes the Lambda with it)."""
+    import yaml
+
+    try:
+        with open(args.file, encoding="utf-8") as f:
+            config = yaml.safe_load(f)
+    except OSError as e:
+        print(e, file=sys.stderr)
+        return 1
+    payload = {
+        "config": config,
+        "config_path": args.file,
+        "image": args.image,
+        "started_by": args.started_by,
+        "commit_sha": args.commit_sha,
+    }
+    print(json.dumps(payload))
+    return 0
+
+
 def cmd_db_migrate(args: argparse.Namespace) -> int:
     from db import connect
     from db.migrate import migrate
@@ -192,6 +214,13 @@ def main(argv: list[str] | None = None) -> int:
     check_release.add_argument(
         "--datasets", default="configs/datasets", help="folder of dataset configs"
     )
+    round_input = sub.add_parser(
+        "round-input", help="print the start-round input for a round config"
+    )
+    round_input.add_argument("file", help="configs/rounds/<name>.yaml")
+    round_input.add_argument("--started-by", required=True, help="GitHub login of the merger")
+    round_input.add_argument("--commit-sha", required=True)
+    round_input.add_argument("--image", required=True, help="worker image built for the commit")
     release_input = sub.add_parser(
         "release-input", help="print the model-release input for a release file"
     )
@@ -233,6 +262,7 @@ def main(argv: list[str] | None = None) -> int:
         "check-round": cmd_check_round,
         "check-release": cmd_check_release,
         "release-input": cmd_release_input,
+        "round-input": cmd_round_input,
         "seed": cmd_seed,
         "logs": cmd_logs,
     }
