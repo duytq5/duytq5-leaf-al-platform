@@ -5,3 +5,10 @@
 	encode gzip
 	reverse_proxy oauth2-proxy:4180
 }
+
+# The image viewer (FiftyOne): same pattern, its own oauth2-proxy lets only
+# the Cognito `admins` group through.
+{$VIEWER_DOMAIN} {
+	encode gzip
+	reverse_proxy viewer-gate:4180
+}

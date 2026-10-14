@@ -3,6 +3,7 @@
 # (Cognito sign-in, groups labelers / admins only).
 #
 #   internet :443 -> caddy -> oauth2-proxy :4180 -> label-studio :8080
+#   internet :443 -> caddy -> viewer-gate :4180 -> viewer-app :5151 (admins only)
 #   label step Lambdas (VPC) -> label-studio :8080 with the admin API token
 #
 # Secrets come from .env next to this file (gitignored). On EC2, write .env
@@ -141,14 +142,95 @@ services:
       OAUTH2_PROXY_SKIP_PROVIDER_BUTTON: "true"
       OAUTH2_PROXY_PASS_HOST_HEADER: "true"
 
-  # HTTPS with a Let's Encrypt certificate for LS_DOMAIN (renewed by Caddy).
+  # Image viewer (FiftyOne, open source): every image of every dataset with
+  # its split, status, source, label, versions, a label from a running round
+  # and the app's guess. Read only: rounds still start from GitHub.
+  # viewer-sync copies raw/ images to DATA_DIR/viewer/media (FiftyOne shows
+  # local files only) and refreshes the FiftyOne datasets from Postgres every
+  # SYNC_MINUTES; viewer-app serves them; both keep the datasets in mongo.
+  mongo:
+    image: mongo:7.0.14
+    restart: unless-stopped
+    command: ["--wiredTigerCacheSizeGB", "0.25"]
+    mem_limit: 512m
+    volumes:
+      - ${DATA_DIR}/viewer/mongo:/data/db
+
+  viewer-sync:
+    build:
+      context: ../..
+      dockerfile: deploy/ec2/viewer/Dockerfile
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      mongo:
+        condition: service_started
+    command: ["python", "-m", "viewer.main"]
+    mem_limit: 512m
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-al}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-al}?sslmode=require
+      DATA_BUCKET: ${DATA_BUCKET:?set DATA_BUCKET in .env}
+      AWS_REGION: ${AWS_REGION}
+      MEDIA_DIR: /media
+      SYNC_MINUTES: "10"
+      FIFTYONE_DATABASE_URI: mongodb://mongo:27017
+    volumes:
+      - ${DATA_DIR}/viewer/media:/media
+
+  viewer-app:
+    build:
+      context: ../..
+      dockerfile: deploy/ec2/viewer/Dockerfile
+    restart: unless-stopped
+    depends_on:
+      - mongo
+    command: ["python", "-m", "fiftyone.server.main", "--address=0.0.0.0", "--port=5151"]
+    mem_limit: 768m
+    environment:
+      FIFTYONE_DATABASE_URI: mongodb://mongo:27017
+    volumes:
+      - ${DATA_DIR}/viewer/media:/media:ro
+
+  # The viewer has no login of its own: a second oauth2-proxy on the same
+  # Cognito client lets only the admins group through.
+  viewer-gate:
+    image: quay.io/oauth2-proxy/oauth2-proxy:v7.15.5
+    restart: unless-stopped
+    depends_on:
+      - viewer-app
+    command:
+      - --allowed-group=admins
+      - --email-domain=*
+    environment:
+      OAUTH2_PROXY_PROVIDER: oidc
+      OAUTH2_PROXY_PROVIDER_DISPLAY_NAME: Cognito
+      OAUTH2_PROXY_OIDC_ISSUER_URL: ${OAUTH2_PROXY_OIDC_ISSUER_URL:?set it in .env}
+      OAUTH2_PROXY_CLIENT_ID: ${OAUTH2_PROXY_CLIENT_ID:?set it in .env}
+      OAUTH2_PROXY_CLIENT_SECRET: ${OAUTH2_PROXY_CLIENT_SECRET:?set it in .env}
+      OAUTH2_PROXY_COOKIE_SECRET: ${OAUTH2_PROXY_COOKIE_SECRET:?set it in .env}
+      OAUTH2_PROXY_REDIRECT_URL: https://${VIEWER_DOMAIN}/oauth2/callback
+      OAUTH2_PROXY_SCOPE: openid email profile
+      OAUTH2_PROXY_CODE_CHALLENGE_METHOD: S256
+      OAUTH2_PROXY_OIDC_GROUPS_CLAIM: cognito:groups
+      OAUTH2_PROXY_UPSTREAMS: http://viewer-app:5151
+      OAUTH2_PROXY_HTTP_ADDRESS: 0.0.0.0:4180
+      OAUTH2_PROXY_REVERSE_PROXY: "true"
+      OAUTH2_PROXY_COOKIE_SECURE: "true"
+      OAUTH2_PROXY_SKIP_PROVIDER_BUTTON: "true"
+      OAUTH2_PROXY_PASS_HOST_HEADER: "true"
+
+  # HTTPS with Let's Encrypt certificates for LS_DOMAIN and VIEWER_DOMAIN
+  # (renewed by Caddy).
   caddy:
     image: caddy:2.11.7-alpine
     restart: unless-stopped
     depends_on:
       - oauth2-proxy
+      - viewer-gate
     environment:
       LS_DOMAIN: ${LS_DOMAIN}
+      VIEWER_DOMAIN: ${VIEWER_DOMAIN:?set VIEWER_DOMAIN in .env}
     volumes:
       - ./caddy/Caddyfile:/etc/caddy/Caddyfile:ro
       # Certificates survive restarts, so Let's Encrypt limits are never hit.

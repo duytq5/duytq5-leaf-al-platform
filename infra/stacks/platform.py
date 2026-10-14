@@ -34,6 +34,8 @@ Deploy-time settings come from CDK context (`cdk deploy -c key=value`):
   labelStudioDomain   Label Studio's host name (default <Elastic IP>.sslip.io,
                       a free name that resolves to the IP, so Caddy can get a
                       Let's Encrypt certificate without owning a domain)
+  viewerDomain        image viewer's (FiftyOne) host name (default
+                      view.<Elastic IP>.sslip.io)
 """
 
 from pathlib import Path
@@ -92,6 +94,7 @@ SSM_MODEL_RELEASE_ARN = f"{SSM_PREFIX}/state-machines/model-release"
 SSM_USER_POOL_ID = f"{SSM_PREFIX}/auth/user-pool-id"
 SSM_LABEL_STUDIO_DOMAIN = f"{SSM_PREFIX}/label-studio/domain"
 SSM_LABEL_STUDIO_CLIENT_ID = f"{SSM_PREFIX}/label-studio/client-id"
+SSM_VIEWER_DOMAIN = f"{SSM_PREFIX}/viewer/domain"
 # Secrets Manager JSON created by the owner (docs/aws-setup.md): admin_email,
 # admin_password, api_token, webhook_secret, cookie_secret. The host reads it
 # at setup; CloudFormation puts api_token and webhook_secret into the Lambdas.
@@ -497,6 +500,10 @@ class PlatformStack(Stack):
         self.label_studio_domain = (
             self.node.try_get_context("labelStudioDomain") or f"{eip.attr_public_ip}.sslip.io"
         )
+        # The image viewer (FiftyOne) on the same host and Caddy.
+        self.viewer_domain = (
+            self.node.try_get_context("viewerDomain") or f"view.{eip.attr_public_ip}.sslip.io"
+        )
         # Caddy: ACME HTTP challenge and redirect on 80, Label Studio on 443.
         for port in (80, 443):
             sg.add_ingress_rule(ec2.Peer.any_ipv4(), ec2.Port.tcp(port), "Label Studio (Caddy)")
@@ -819,11 +826,15 @@ class PlatformStack(Stack):
         self.admin_web_client = self._app_client(
             "AdminWebClient", "admin-web", urls("adminCallbackUrls", DEFAULT_ADMIN_CALLBACK), None
         )
-        # oauth2-proxy in front of Label Studio: a server, so it keeps a secret.
+        # oauth2-proxy in front of Label Studio, and the second one in front of
+        # the image viewer: servers, so they keep a secret.
         self.label_studio_client = self._app_client(
             "LabelStudioClient",
             "label-studio",
-            [f"https://{self.label_studio_domain}/oauth2/callback"],
+            [
+                f"https://{self.label_studio_domain}/oauth2/callback",
+                f"https://{self.viewer_domain}/oauth2/callback",
+            ],
             None,
             generate_secret=True,
         )
@@ -835,6 +846,7 @@ class PlatformStack(Stack):
                 self.label_studio_client.user_pool_client_id,
             ),
             ("LabelStudioDomainParam", SSM_LABEL_STUDIO_DOMAIN, self.label_studio_domain),
+            ("ViewerDomainParam", SSM_VIEWER_DOMAIN, self.viewer_domain),
         ]:
             ssm.StringParameter(self, construct_id, parameter_name=name, string_value=value)
 
@@ -1053,6 +1065,7 @@ class PlatformStack(Stack):
             ],
         )
         CfnOutput(self, "LabelStudioUrl", value=f"https://{self.label_studio_domain}")
+        CfnOutput(self, "ViewerUrl", value=f"https://{self.viewer_domain}")
 
     def _upload_validation(self) -> None:
         """App images: S3 incoming/ -> UploadQueue -> UploadFn (design doc F1
