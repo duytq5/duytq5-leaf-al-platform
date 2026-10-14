@@ -19,8 +19,8 @@ uploads images and downloads ONNX models.
 | `deploy/ec2/` | Docker Compose for the single EC2 instance: Postgres, MLflow, Label Studio behind Caddy and oauth2-proxy |
 | `cli/` | Operator CLI `al` |
 | `configs/datasets/` | YAML dataset configs: the class list (code + display name) and the fixed train/val/test split |
-| `configs/train/` | YAML training configs |
-| `configs/rounds/` | YAML round configs: strategy, its parameters and k, chosen by a human per round |
+| `recipes/` | Training recipes: a registered `TrainRecipe` with its `Params` per model family (`al recipes`) |
+| `configs/examples/` | An example round config; real round files live in the ops repo's `configs/rounds/` |
 | `tests/` | Unit tests |
 
 ## Development
@@ -91,28 +91,27 @@ rolled back to.
 Nothing is deployed from this repo automatically. The owner runs the AWS
 steps by hand; the exact commands are in [docs/aws-setup.md](docs/aws-setup.md).
 
-## Choosing a strategy per round
+## Choosing training and selection per round
 
-Selection is never hardcoded. Before each round you look at the data and the
-latest scores, then write a round config:
+Neither training nor selection is hardcoded. Before each round you look at the
+data and the latest scores, then write a round config:
 
 ```yaml
-dataset: durian
-mode: simulation
-train_config: configs/train/example.yaml
+dataset: rocole
+train: {recipe: timm_classifier, params: {epochs: 20}}   # base_model: models:/<name>@champion
 selection: {strategy: random, params: {}, k: 50, seed: 42}
 ```
 
 ```bash
+uv run al recipes                                      # training recipes and their parameters
 uv run al strategies                                   # names, required inputs, parameters
-uv run al check-round configs/rounds/example.yaml      # validate before starting
+uv run al check-round configs/examples/round.yaml      # validate before starting
 ```
 
-Unknown strategies, misspelled parameters and invalid k are rejected. The
-chosen strategy, parameters and k are stored on the round's row, so every
-round can be reproduced. Phase 1 adds `al round preview` (dry-run a strategy
-on the latest scores: which images it would pick, their predicted classes and
-confidence) and `al round start`.
+Unknown recipes or strategies, misspelled parameters and invalid k are
+rejected. The chosen values are stored on the round's row and its model
+version, so every round can be reproduced. A round starts when its config
+merges to `main` of the ops repo.
 
 ## Rules
 
@@ -125,6 +124,6 @@ confidence) and `al round start`.
 
 ## Roadmap
 
-1. **AL loop in simulation mode**: a 10-round RoCoLe simulation runs unattended for each strategy and exports learning curves.
+1. **AL loop** (production only): a merged round config trains on the GPU worker, selects k images and waits for the expert's labels in Label Studio.
 2. **Labeling and edge upload**: an app-uploaded image is labeled in Label Studio in the next round and used in training.
-3. **Model update to mobile**: promote makes the app download the new model; rollback restores the previous one.
+3. **Model update to mobile**: merging a release file makes the app download the new model; reverting it restores the previous one.

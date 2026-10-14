@@ -90,9 +90,9 @@ def _in_version(db, version_id: int, image_id: int, label_id: int) -> None:
 def _round(db, dataset_id: int, status="running", k=3, token=None, project=None) -> uuid.UUID:
     round_id = uuid.uuid4()
     db.execute(
-        "INSERT INTO rounds (id, dataset_id, base_version_id, mode, strategy, k, seed, status,"
+        "INSERT INTO rounds (id, dataset_id, base_version_id, strategy, k, seed, status,"
         " started_by, commit_sha, label_task_token, ls_project_id)"
-        " VALUES (%s, %s, %s, 'production', 'margin', %s, 7, %s, 'duytq5', %s, %s, %s)",
+        " VALUES (%s, %s, %s, 'margin', %s, 7, %s, 'duytq5', %s, %s, %s)",
         (round_id, dataset_id, _version(db, dataset_id, 0), k, status, COMMIT, token, project),
     )
     return round_id

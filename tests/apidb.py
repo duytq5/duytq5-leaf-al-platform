@@ -64,9 +64,9 @@ def model(conn, dataset_id: int, name: str, version: int, exported: bool = True)
     """A model version trained by its own (finished) round."""
     round_id = uuid.uuid4()
     conn.execute(
-        "INSERT INTO rounds (id, dataset_id, base_version_id, mode, strategy, k, seed,"
+        "INSERT INTO rounds (id, dataset_id, base_version_id, strategy, k, seed,"
         " status, started_by, commit_sha)"
-        " SELECT %s, %s, id, 'production', 'random', 5, 0, 'succeeded', 'duytq5', %s"
+        " SELECT %s, %s, id, 'random', 5, 0, 'succeeded', 'duytq5', %s"
         " FROM dataset_versions WHERE dataset_id = %s AND version = 0",
         (round_id, dataset_id, "c" * 40, dataset_id),
     )

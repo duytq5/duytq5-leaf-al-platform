@@ -21,12 +21,7 @@ from tests.test_seed import make_folder
 
 COMMIT = "c" * 40
 IMAGE = "ghcr.io/duytq5/duytq5-leaf-al-platform-worker:" + COMMIT
-TRAIN = {
-    "model": {"arch": "fastvit_t8"},
-    "head": {"num_classes": 2},
-    "data": {"dataset": "toy", "version": "v0"},
-    "train": {"epochs": 1, "batch_size": 8, "lr": 3e-4},
-}
+TRAIN = {"recipe": "timm_classifier", "params": {"epochs": 1, "batch_size": 8}, "base_model": None}
 RESULT = TrainResult(
     mlflow_name="toy",
     mlflow_version=1,
@@ -83,9 +78,9 @@ def env(pg_url, tmp_path):
 def _round(conn, strategy: str = "random", k: int = 3) -> uuid.UUID:
     rid = uuid.uuid4()
     conn.execute(
-        "INSERT INTO rounds (id, dataset_id, base_version_id, mode, strategy, k, seed,"
+        "INSERT INTO rounds (id, dataset_id, base_version_id, strategy, k, seed,"
         " started_by, commit_sha)"
-        " SELECT %s, d.id, v.id, 'production', %s, %s, 7, 'owner', %s"
+        " SELECT %s, d.id, v.id, %s, %s, 7, 'owner', %s"
         " FROM datasets d JOIN dataset_versions v ON v.dataset_id = d.id AND v.version = 0"
         " WHERE d.name = 'toy'",
         (rid, strategy, k, COMMIT),
@@ -171,6 +166,11 @@ def test_a_round_from_start_to_merge(env):
     )
     assert job.job_id == job_uuid(rid, JobType.TRAIN)
     assert [c.code for c in job.spec.classes] == ["a", "b"]
+    assert (job.spec.recipe, job.spec.params, job.spec.base_model) == (
+        "timm_classifier",
+        {"epochs": 1, "batch_size": 8},
+        None,
+    )
     assert out["score"]["outputs"] == ["probs"]
     assert out["score"]["output_uri"] == f"s3://data/{scores_key(rid)}"
 
@@ -224,9 +224,9 @@ def test_the_next_round_trains_on_the_merged_version(env):
 
     second = uuid.uuid4()
     conn.execute(
-        "INSERT INTO rounds (id, dataset_id, base_version_id, mode, strategy, k, seed,"
+        "INSERT INTO rounds (id, dataset_id, base_version_id, strategy, k, seed,"
         " started_by, commit_sha)"
-        " SELECT %s, dataset_id, id, 'production', 'random', 3, 7, 'owner', %s"
+        " SELECT %s, dataset_id, id, 'random', 3, 7, 'owner', %s"
         " FROM dataset_versions WHERE version = 1",
         (second, COMMIT),
     )
