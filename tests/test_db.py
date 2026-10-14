@@ -669,3 +669,12 @@ def test_migration_0005_fills_dataset_id_of_round_models(pg_url):
         (dataset,) = c.execute("SELECT d.name FROM model_versions mv"
                                " JOIN datasets d ON d.id = mv.dataset_id").fetchone()  # fmt: skip
         assert dataset == "toy"
+
+
+def test_models_record_their_worker_image(conn):
+    """Migration 0006: the release exports in the image the model was trained in."""
+    (nullable,) = conn.execute(
+        "SELECT is_nullable FROM information_schema.columns"
+        " WHERE table_name = 'model_versions' AND column_name = 'image'"
+    ).fetchone()
+    assert nullable == "YES"  # models trained before 0006 have none

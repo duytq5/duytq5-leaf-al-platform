@@ -17,12 +17,10 @@ from cli.main import main
 from common.jobs import ExportSpec
 from common.release import ExportResult, ReleaseExecution, ReleaseFile, export_job_uuid
 from lambdas import release
-from tests.apidb import SHA, crop, dataset, model
+from tests.apidb import SHA, TRAINED_IMAGE, crop, dataset, model
 
 ROOT = Path(__file__).resolve().parents[1]
 COMMIT = "e" * 40
-# tests.apidb.model() trains every version in a round of commit "c" * 40.
-TRAINED_IMAGE = "ghcr.io/duytq5/duytq5-leaf-al-platform-worker:" + "c" * 40
 
 
 def _execution(version: int, commit: str = COMMIT, *, model_name="durian-fastvit", ds="durian"):
@@ -156,12 +154,19 @@ def test_prepare_builds_the_export_job(db, durian):
     out = release.prepare(db, ev)
     assert out["job_id"] == str(export_job_uuid(ev))
     # The export runs in the image that trained the model: the same recipe
-    # code (preprocessing, transforms), whatever changed since.
+    # code (preprocessing, transforms), whatever changed since. Not the
+    # round's commit_sha: that is the ops repo commit.
     assert out["image"] == TRAINED_IMAGE
     spec = ExportSpec.model_validate(out["spec"])
     assert spec.model_uri == "models:/durian-fastvit/2"
     assert spec.output_prefix == "edge/durian-fastvit/2/"
     assert [c.code for c in spec.labels] == ["a", "b"]
+
+
+def test_prepare_refuses_a_model_with_no_recorded_image(db, durian):
+    db.execute("UPDATE model_versions SET image = NULL WHERE mlflow_version = 2")
+    with pytest.raises(release.ReleaseError, match="no worker image"):
+        release.prepare(db, _execution(2))
 
 
 @pytest.mark.parametrize(

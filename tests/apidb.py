@@ -60,6 +60,11 @@ def dataset(conn, name: str, crop_id: int, display_name: str) -> int:
     return dataset_id
 
 
+# The worker image models are trained in: a platform commit, unlike the
+# rounds' commit_sha, which is the ops repo commit that started them.
+TRAINED_IMAGE = "ghcr.io/duytq5/duytq5-leaf-al-platform-worker:" + "f" * 40
+
+
 def model(conn, dataset_id: int, name: str, version: int, exported: bool = True) -> int:
     """A model version trained by its own (finished) round."""
     round_id = uuid.uuid4()
@@ -78,11 +83,11 @@ def model(conn, dataset_id: int, name: str, version: int, exported: bool = True)
     return conn.execute(
         "INSERT INTO model_versions (round_id, dataset_id, trained_on_version_id, mlflow_name,"
         " mlflow_version, mlflow_run_id, arch, train_config, labels,"
-        " onnx_s3_key, onnx_sha256, size_bytes, exported_at)"
+        " onnx_s3_key, onnx_sha256, size_bytes, exported_at, image)"
         " SELECT %s, dataset_id, base_version_id, %s, %s, 'run', 'fastvit_t8', '{}',"
         """ '[{"code": "a", "display_name": "A"}, {"code": "b", "display_name": "B"}]',"""
-        " %s, %s, %s, %s::timestamptz FROM rounds WHERE id = %s RETURNING id",
-        (round_id, name, version, *export, round_id),
+        " %s, %s, %s, %s::timestamptz, %s FROM rounds WHERE id = %s RETURNING id",
+        (round_id, name, version, *export, TRAINED_IMAGE, round_id),
     ).fetchone()[0]
 
 

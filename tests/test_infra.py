@@ -394,6 +394,7 @@ def test_training_state_machine_trains_then_records(full):
     assert body["spec.$"] == "$.snapshot.spec"
     assert "HeartbeatSeconds" not in train and train["TimeoutSeconds"] == 14 * 24 * 3600
     assert states["Record"]["Parameters"]["train_result.$"] == "$.train_result"
+    assert states["Record"]["Parameters"]["image.$"] == "$.image"
     full.has_resource_properties(
         "AWS::SSM::Parameter", {"Name": "/leaf-al/state-machines/al-train"}
     )
