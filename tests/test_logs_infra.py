@@ -1,5 +1,7 @@
 """Every log of the stack sits under /leaf-al/ so one search covers the flow."""
 
+import json
+
 import pytest
 
 pytest.importorskip("aws_cdk")
@@ -58,6 +60,8 @@ def test_named_groups_for_each_part_of_the_flow(template):
         "/leaf-al/control/cancel-round",
         "/leaf-al/states/al-round",
         "/leaf-al/states/model-release",
+        "/leaf-al/worker",
+        "/leaf-al/host",
     } <= names
 
 
@@ -101,3 +105,36 @@ def test_saved_queries_cover_every_group(template):
     for q in queries.values():
         assert len(q["LogGroupNames"]) == len(groups)
     assert "ROUND_ID" in queries["leaf-al/follow-an-id"]["QueryString"]
+
+
+def _log_writes(template: Template, policies: dict) -> list[dict]:
+    return [
+        s
+        for p in policies.values()
+        for s in p["Properties"]["PolicyDocument"]["Statement"]
+        if any(
+            a.startswith("logs:")
+            for a in (s["Action"] if isinstance(s["Action"], list) else [s["Action"]])
+        )
+    ]
+
+
+def _group_ref(template: Template, name: str) -> str:
+    (ref,) = [k for k, g in _groups(template).items() if g["LogGroupName"] == name]
+    return ref
+
+
+@pytest.mark.parametrize(
+    ("policy_type", "owner", "group"),
+    [
+        ("AWS::IAM::ManagedPolicy", "WorkerPolicy", "/leaf-al/worker"),
+        ("AWS::IAM::Policy", "HostRoleDefaultPolicy", "/leaf-al/host"),
+    ],
+)
+def test_worker_and_host_may_only_write_their_own_group(template, policy_type, owner, group):
+    policies = {
+        k: v for k, v in template.find_resources(policy_type).items() if k.startswith(owner)
+    }
+    (stmt,) = _log_writes(template, policies)
+    assert sorted(stmt["Action"]) == ["logs:CreateLogStream", "logs:PutLogEvents"]
+    assert _group_ref(template, group) in json.dumps(stmt["Resource"])

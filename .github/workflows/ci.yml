@@ -17,7 +17,10 @@ jobs:
       - run: uv run ruff check .
       - run: uv run ruff format --check .
       - name: Validate EC2 compose file
-        run: cp deploy/ec2/.env.example deploy/ec2/.env && docker compose -f deploy/ec2/docker-compose.yml config -q
+        run: |
+          cp deploy/ec2/.env.example deploy/ec2/.env
+          docker compose -f deploy/ec2/docker-compose.yml config -q
+          docker compose -f deploy/ec2/docker-compose.yml -f deploy/ec2/docker-compose.logs.yml config -q
       # Database tests run against the real compose Postgres, with the same
       # TLS settings and pg_hba.conf as on EC2.
       - name: Start Postgres with TLS
