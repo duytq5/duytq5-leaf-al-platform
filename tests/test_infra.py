@@ -473,7 +473,7 @@ def test_only_main_of_the_ops_repo_may_assume_the_github_role(full):
             # Not pull requests, other branches or forks: only what merged to
             # main of the ops repo, which holds the round and release files.
             "token.actions.githubusercontent.com:sub": (
-                "repo:duytq5/duytq5-leaf-al-ops:ref:refs/heads/main"
+                "repo:duytq5/active-learning-operation:ref:refs/heads/main"
             ),
         }
     }

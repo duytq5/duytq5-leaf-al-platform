@@ -123,7 +123,7 @@ GITHUB_REPO = "duytq5/duytq5-leaf-al-platform"
 REPO_URL = f"https://github.com/{GITHUB_REPO}.git"
 # The repo with configs/rounds/ and configs/releases/ and the workflows that
 # act on them; override with `-c opsRepo=owner/name`.
-OPS_REPO = "duytq5/duytq5-leaf-al-ops"
+OPS_REPO = "duytq5/active-learning-operation"
 GITHUB_OIDC_HOST = "token.actions.githubusercontent.com"
 GITHUB_ROLE_NAME = "leaf-al-github-actions"
 REPO_DIR = "/home/ec2-user/duytq5-leaf-al-platform"

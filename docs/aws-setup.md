@@ -538,7 +538,7 @@ aws sqs start-message-move-task --source-arn $(aws sqs get-queue-attributes --qu
 ## 7. GitHub Actions (the ops repo)
 
 Rounds and releases are run from a separate repo, the ops repo
-(`duytq5/duytq5-leaf-al-ops` unless you deploy with `-c opsRepo=owner/name`).
+(`duytq5/active-learning-operation` unless you deploy with `-c opsRepo=owner/name`).
 It holds `configs/rounds/`, `configs/releases/` and the workflows that act on
 them; this repo holds the code. The ops repo's workflows reach AWS with
 GitHub's OIDC token and the IAM role `leaf-al-github-actions`; no AWS keys are
@@ -549,7 +549,7 @@ secret; it names the role, it grants nothing):
 
 ```bash
 ROLE_ARN=$(aws cloudformation describe-stacks --stack-name LeafAlPlatform --query "Stacks[0].Outputs[?OutputKey=='GithubActionsRoleArn'].OutputValue" --output text)
-gh variable set AWS_ROLE_ARN --repo duytq5/duytq5-leaf-al-ops --body "$ROLE_ARN"
+gh variable set AWS_ROLE_ARN --repo duytq5/active-learning-operation --body "$ROLE_ARN"
 ```
 
 (or the ops repo on GitHub, Settings, Secrets and variables, Actions, Variables tab.)
