@@ -142,8 +142,10 @@ rm -r /tmp/leaf-al-tls
 ```
 
 To replace the certificate later (or the old self-signed one from before the
-CA), run the same block, then `scripts/ec2.sh setup`: it restarts Postgres
-when the certificate changed. Clients then download `tls-ca` again.
+CA), run the same block, then deploy again (section 2) and run
+`scripts/ec2.sh setup`: the deploy copies the new `tls-ca` into the Lambdas'
+settings, and `setup` restarts Postgres when the certificate changed. Clients
+then download `tls-ca` again.
 
 The round Lambdas have no internet access, so they cannot read SSM at run
 time. CloudFormation copies the password into their settings at deploy time
@@ -329,11 +331,16 @@ The tunnel is for you and the worker. The PR that adds the first Lambda that
 needs Postgres also decides how that Lambda reaches it.
 
 If the services already run from an earlier version of this repo, create the
-three TLS parameters (section 1), then from your machine:
+three TLS parameters and both secrets (section 1), deploy (section 2), then
+from your machine:
 
 ```bash
 scripts/ec2.sh setup     # recreates Postgres with TLS; data is kept
 ```
+
+`setup` before that deploy stops at `write-env.sh`: it reads settings the
+deploy writes (Label Studio, viewer, Cognito) and the containers log to
+groups the deploy creates. The running services are left as they were.
 
 ## 3a. Database tables and seed data
 
