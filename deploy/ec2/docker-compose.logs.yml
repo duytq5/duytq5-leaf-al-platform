@@ -25,5 +25,13 @@ services:
     logging: *cloudwatch
   oauth2-proxy:
     logging: *cloudwatch
+  mongo:
+    logging: *cloudwatch
+  viewer-sync:
+    logging: *cloudwatch
+  viewer-app:
+    logging: *cloudwatch
+  viewer-gate:
+    logging: *cloudwatch
   caddy:
     logging: *cloudwatch
