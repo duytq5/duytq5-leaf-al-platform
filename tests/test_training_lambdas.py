@@ -82,8 +82,9 @@ def test_a_training_from_start_to_record(env):
     assert job.spec.dataset == "toy" and job.spec.params["epochs"] == 2
     assert [c.code for c in job.spec.classes] == ["a", "b"]
 
-    assert training.record(conn, tid, RESULT) == {"model": "models:/toy/4"}
-    assert training.record(conn, tid, RESULT) == {"model": "models:/toy/4"}  # a retry
+    assert training.record(conn, tid, RESULT, IMAGE) == {"model": "models:/toy/4"}
+    assert training.record(conn, tid, RESULT, IMAGE) == {"model": "models:/toy/4"}  # a retry
+    assert conn.execute("SELECT image FROM model_versions").fetchone() == (IMAGE,)
     assert _status(conn, tid) == "succeeded"
     model = conn.execute(
         "SELECT mv.round_id, mv.training_id, d.name, v.version, mv.metrics, mv.labels"
@@ -158,7 +159,7 @@ def test_a_training_on_a_later_version_and_the_newest_model(env):
     assert version == 1
     training.mark_running(conn, tid)
     training.snapshot(conn, store, tid)
-    training.record(conn, tid, RESULT)
+    training.record(conn, tid, RESULT, IMAGE)
     assert control._newest_model(conn, conn.execute("SELECT id FROM datasets").fetchone()[0]) == (
         "models:/toy/4"
     )
@@ -215,5 +216,6 @@ def test_handlers(env, monkeypatch):
     state["snapshot"] = training.snapshot_handler(state, None)
     state["train_result"] = RESULT.model_dump(mode="json")
     assert training.record_handler(state, None) == {"model": "models:/toy/4"}
+    assert conn.execute("SELECT image FROM model_versions").fetchone() == (IMAGE,)
     training.fail_handler(state, None)  # a finished training stays succeeded
     assert _status(conn, uuid.UUID(out["training_id"])) == "succeeded"

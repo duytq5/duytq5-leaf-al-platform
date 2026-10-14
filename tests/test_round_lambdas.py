@@ -210,6 +210,10 @@ def test_a_round_from_start_to_merge(env):
     ]
     assert model[4] == {"test_accuracy": 0.9}
     assert model[5] == TRAIN
+    # The release exports in the image the model was trained in.
+    assert conn.execute(
+        "SELECT image FROM model_versions WHERE round_id = %s", (rid,)
+    ).fetchone() == (IMAGE,)
     assert conn.execute(
         "SELECT label_task_token, finished_at IS NOT NULL FROM rounds WHERE id = %s", (rid,)
     ).fetchone() == (None, True)

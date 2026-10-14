@@ -24,7 +24,6 @@ import psycopg
 from common.jobs import ExportSpec
 from common.release import ExportResult, ReleaseExecution, export_job_uuid
 from common.s3keys import edge_prefix
-from common.types import WORKER_IMAGE_REPO
 from lambdas.logs import traced
 from lambdas.postgres import open_db
 
@@ -34,10 +33,8 @@ class ReleaseError(RuntimeError):
 
 
 _VERSION = """
-    SELECT mv.id, mv.labels, mv.onnx_sha256, coalesce(r.commit_sha, t.commit_sha)
+    SELECT mv.id, mv.labels, mv.onnx_sha256, mv.image
       FROM model_versions mv
-      LEFT JOIN rounds r ON r.id = mv.round_id
-      LEFT JOIN trainings t ON t.id = mv.training_id
       JOIN datasets d ON d.id = mv.dataset_id
      WHERE d.name = %s AND mv.mlflow_name = %s AND mv.mlflow_version = %s
 """
@@ -63,7 +60,12 @@ def _version(conn: psycopg.Connection, ev: ReleaseExecution) -> tuple[int, list,
 
 def prepare(conn: psycopg.Connection, ev: ReleaseExecution) -> dict[str, Any]:
     """The export job for the released version."""
-    _, labels, _, trained_at = _version(conn, ev)
+    _, labels, _, image = _version(conn, ev)
+    if image is None:
+        raise ReleaseError(
+            f"{ev.model}/{ev.version} has no worker image recorded (trained before"
+            " migration 0006); train it again to release it"
+        )
     spec = ExportSpec(
         model_uri=f"models:/{ev.model}/{ev.version}",
         output_prefix=edge_prefix(ev.model, ev.version),
@@ -71,7 +73,7 @@ def prepare(conn: psycopg.Connection, ev: ReleaseExecution) -> dict[str, Any]:
     )
     return {
         "job_id": str(export_job_uuid(ev)),
-        "image": f"{WORKER_IMAGE_REPO}:{trained_at}",
+        "image": image,
         "spec": spec.model_dump(mode="json"),
     }
 

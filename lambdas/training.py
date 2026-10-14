@@ -29,6 +29,7 @@ from pydantic import BaseModel, ConfigDict, ValidationError
 from common.jobs import JobType, TrainResult, job_uuid
 from common.round import TrainSection
 from common.training import TrainingConfig, TrainingExecution
+from common.types import WorkerImage
 from lambdas.control import StartRound
 from lambdas.logs import traced
 from lambdas.postgres import open_db
@@ -143,8 +144,11 @@ def snapshot(conn: psycopg.Connection, store: S3Store, training_id: UUID) -> dic
     }
 
 
-def record(conn: psycopg.Connection, training_id: UUID, result: TrainResult) -> dict[str, str]:
-    """Store the trained model and finish the training, in one transaction."""
+def record(
+    conn: psycopg.Connection, training_id: UUID, result: TrainResult, image: str
+) -> dict[str, str]:
+    """Store the trained model (with the worker image it was trained in, for
+    the release's export) and finish the training, in one transaction."""
     with conn.transaction():
         status, dataset_id, _, version_id, _, train = _load(conn, training_id, lock=True)
         if status == "running":
@@ -152,8 +156,8 @@ def record(conn: psycopg.Connection, training_id: UUID, result: TrainResult) -> 
                 """
                 INSERT INTO model_versions (training_id, dataset_id, trained_on_version_id,
                     mlflow_name, mlflow_version, mlflow_run_id, arch, train_config, labels,
-                    metrics)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    metrics, image)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 """,
                 (
                     training_id,
@@ -166,6 +170,7 @@ def record(conn: psycopg.Connection, training_id: UUID, result: TrainResult) -> 
                     Jsonb(train),
                     Jsonb(_classes(conn, dataset_id)),
                     Jsonb(result.metrics),
+                    image,
                 ),
             )
             conn.execute(
@@ -200,6 +205,7 @@ class _Event(BaseModel):
 
 class _RecordEvent(_Event):
     train_result: TrainResult
+    image: WorkerImage
 
 
 def _store() -> S3Store:
@@ -229,7 +235,7 @@ def snapshot_handler(event: dict, _context) -> dict:
 def record_handler(event: dict, _context) -> dict:
     ev = _RecordEvent.model_validate(event)
     with open_db() as conn:
-        return record(conn, ev.training_id, ev.train_result)
+        return record(conn, ev.training_id, ev.train_result, ev.image)
 
 
 @traced

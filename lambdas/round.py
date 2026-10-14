@@ -356,8 +356,8 @@ def merge(
                 """
                 INSERT INTO model_versions (round_id, dataset_id, trained_on_version_id,
                     mlflow_name, mlflow_version, mlflow_run_id, arch, train_config, labels,
-                    metrics)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    metrics, image)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 """,
                 (
                     run.round_id,
@@ -370,6 +370,7 @@ def merge(
                     Jsonb(run.train.model_dump(mode="json")),
                     Jsonb(_classes(conn, rnd.dataset_id)),
                     Jsonb(result.metrics),
+                    run.image,
                 ),
             )
         conn.execute(

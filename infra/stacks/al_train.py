@@ -108,7 +108,11 @@ class AlTrain(Construct):
             invoke(
                 "Record",
                 record,
-                {**training_id, "train_result": sfn.JsonPath.object_at("$.train_result")},
+                {
+                    **training_id,
+                    "image": sfn.JsonPath.string_at("$.image"),
+                    "train_result": sfn.JsonPath.object_at("$.train_result"),
+                },
                 "$.record",
             ),
         ]
