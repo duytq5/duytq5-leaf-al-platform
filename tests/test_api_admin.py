@@ -4,6 +4,7 @@
   GET /v1/rounds/{round_id}              admins
   GET /v1/datasets/{name}/versions       admins
   GET /v1/datasets/{name}/versions/{n}   admins (paginated)
+  GET /v1/datasets/{name}/pool           admins
 
 The API Lambda has no route to Step Functions, so a round's phase comes from
 Postgres and its selection file in S3 (selections/{round_id}.json): before
@@ -119,6 +120,8 @@ def _select(store, db, round_id, image_ids) -> None:
         ("/v1/datasets/durian/versions", LABELER, 403),
         ("/v1/datasets/durian/versions/0", UPLOADER, 403),
         ("/v1/datasets/durian/versions", None, 401),
+        ("/v1/datasets/durian/pool", LABELER, 403),
+        ("/v1/datasets/durian/pool", None, 401),
     ],
 )
 def test_groups(api, store, durian, path, claims, status):
@@ -324,6 +327,85 @@ def test_a_full_last_page_has_no_next_cursor(api, store, versions):
 )
 def test_version_items_errors(api, store, versions, path, query, status):
     assert call(api, path, query=query, claims=ADMIN)[0] == status
+
+
+# GET /v1/datasets/{name}/pool
+
+
+def _upload(db, dataset_id: int, n: int, status="unlabeled", age="0 hours") -> int:
+    """A train image from the app, `age` before now."""
+    return db.execute(
+        "INSERT INTO images (dataset_id, sha256, s3_key, status, split, source, created_at)"
+        " VALUES (%s, %s, %s, %s, 'train', 'edge', now() - %s::interval) RETURNING id",
+        (dataset_id, f"{n:064x}", f"raw/durian/{n:064x}.jpg", status, age),
+    ).fetchone()[0]
+
+
+def _round_at(db, round_id, age: str) -> None:
+    db.execute("UPDATE rounds SET created_at = now() - %s::interval WHERE id = %s", (age, round_id))
+
+
+def test_pool_of_a_fresh_dataset(api, store, durian):
+    status, body, _ = call(api, "/v1/datasets/durian/pool", claims=ADMIN)
+    assert status == 200
+    assert body == {
+        "dataset": "durian",
+        "latest_version": 0,
+        "labeled": 0,
+        "label_counts": {"a": 0, "b": 0},
+        "unlabeled": 0,
+        "unlabeled_uploads": 0,
+        "new_since_last_round": 0,
+        "queued": 0,
+        "rejected": 0,
+        "last_round": None,
+    }
+
+
+def test_pool_counts(api, store, db, versions):
+    """versions: v1 holds 4 labels (a 2, b 2), made by a succeeded round."""
+    durian = db.execute("SELECT id FROM datasets WHERE name = 'durian'").fetchone()[0]
+    _round_at(db, versions["round_id"], "2 days")
+    for n in range(10, 13):
+        _image(db, durian, n)  # seed pool images, unlabeled, seeded before any round
+    db.execute("UPDATE images SET created_at = now() - interval '9 days' WHERE source = 'seed'")
+    _upload(db, durian, 20, age="3 days")  # before the last round
+    _upload(db, durian, 21, age="1 day")
+    _upload(db, durian, 22, age="1 hour")
+    _upload(db, durian, 23, status="rejected", age="1 hour")
+    _image(db, durian, 30, split="val", status="labeled")  # never in the pool
+    status, body, _ = call(api, "/v1/datasets/durian/pool", claims=ADMIN)
+    assert status == 200
+    last = body.pop("last_round")
+    assert body == {
+        "dataset": "durian",
+        "latest_version": 1,
+        "labeled": 4,
+        "label_counts": {"a": 2, "b": 2},
+        "unlabeled": 6,
+        "unlabeled_uploads": 3,
+        "new_since_last_round": 2,
+        "queued": 0,
+        "rejected": 1,
+    }
+    assert {k: last[k] for k in ("round_id", "status")} == {
+        "round_id": str(versions["round_id"]),
+        "status": "succeeded",
+    }
+
+
+def test_pool_while_a_round_labels(api, store, db, durian):
+    round_id = _round(db, durian, k=2)
+    images = [_image(db, durian, n) for n in range(1, 4)]
+    _select(store, db, round_id, images[:2])
+    _, body, _ = call(api, "/v1/datasets/durian/pool", claims=ADMIN)
+    assert (body["unlabeled"], body["queued"]) == (1, 2)
+    assert body["last_round"]["round_id"] == str(round_id)
+    assert body["last_round"]["status"] == "running"
+
+
+def test_pool_of_an_unknown_dataset_is_404(api, store, durian):
+    assert call(api, "/v1/datasets/nope/pool", claims=ADMIN)[0] == 404
 
 
 def test_data_store_reads_s3_and_a_missing_key_is_none():

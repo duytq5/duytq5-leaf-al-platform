@@ -5,6 +5,7 @@ GET /v1/rounds/active                 -> ActiveRoundsResponse   (labelers, admin
 GET /v1/rounds/{round_id}             -> RoundStatus            (admins)
 GET /v1/datasets/{name}/versions      -> DatasetVersionsResponse (admins)
 GET /v1/datasets/{name}/versions/{n}  -> VersionItemsResponse    (admins)
+GET /v1/datasets/{name}/pool          -> PoolSummary             (admins)
 """
 
 from enum import StrEnum
@@ -93,3 +94,27 @@ class VersionItemsResponse(_Strict):
     items: list[VersionItem]  # by image_id
     # Pass as ?cursor= for the next page; None on the last page.
     next_cursor: str | None
+
+
+class LastRound(_Strict):
+    round_id: UUID
+    status: RoundStatusName
+    created_at: AwareDatetime
+
+
+class PoolSummary(_Strict):
+    """What an operator reads before starting a round: how much is labeled and
+    how much is waiting to be selected."""
+
+    dataset: DatasetName
+    latest_version: int = Field(ge=0)  # the version a new round trains on by default
+    labeled: int = Field(ge=0)  # labels in latest_version
+    label_counts: dict[ClassCode, int]  # every class of the dataset, 0 included
+    unlabeled: int = Field(ge=0)  # the AL pool: train images not yet selected
+    unlabeled_uploads: int = Field(ge=0)  # the part of the pool that came from the app
+    # Pool images that arrived after the last round started (all of the pool
+    # when there was no round yet).
+    new_since_last_round: int = Field(ge=0)
+    queued: int = Field(ge=0)  # selected by the active round, waiting for a label
+    rejected: int = Field(ge=0)  # marked "not a leaf" by an expert
+    last_round: LastRound | None
