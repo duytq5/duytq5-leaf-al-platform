@@ -5,7 +5,9 @@
 dataset: rocole
 # base_version: 0  # dataset version to train on; default: the latest
 # Leave `train` out for a selection-only round: it scores the pool with an
-# existing model and trains nothing (training runs later on its own).
+# existing model and trains nothing (training runs later on its own). With
+# strategy random it needs no model at all: k random unlabeled images go
+# straight to Label Studio, no worker involved.
 # model: models:/rocole-fastvit@champion  # only without train; default: newest model
 train:
   recipe: timm_classifier

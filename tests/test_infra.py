@@ -347,7 +347,11 @@ def test_a_round_without_train_skips_the_train_job(full):
     scores with the round's model."""
     states = _definition(full)["States"]
     (choice,) = states["TrainOrNot"]["Choices"]
-    assert choice == {"Variable": "$.train", "IsNull": True, "Next": "UseRoundModel"}
+    assert choice == {"Variable": "$.train", "IsNull": True, "Next": "ScoreOrNot"}
+    # No model either (a random round): no score job, straight to Select.
+    (choice,) = states["ScoreOrNot"]["Choices"]
+    assert choice == {"Variable": "$.model", "IsNull": True, "Next": "Select"}
+    assert states["ScoreOrNot"]["Default"] == "UseRoundModel"
     assert states["UseRoundModel"]["Next"] == "Score"
     assert states["UseRoundModel"]["Parameters"] == {"model_uri.$": "$.snapshot.score.model_uri"}
     assert states["UseTrainedModel"]["Parameters"] == {"model_uri.$": "$.train_result.model_uri"}

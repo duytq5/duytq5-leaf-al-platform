@@ -4,7 +4,9 @@ ops repo (example: configs/examples/round.yaml).
 The owner explores the data, then picks the training recipe and the selection
 strategy, their parameters and k for each round. A round without `train` only
 selects (design doc change 24): it scores the pool with `model`, or with the
-dataset's newest model, and training runs later as its own job. Merging the file to the ops
+dataset's newest model, and training runs later as its own job. A strategy that
+needs no scores (random) scores only when `model` is given; otherwise the round
+needs no model and no worker. Merging the file to the ops
 repo's main starts the round (design doc, "Control through GitHub"). Nothing about
 training or selection is hardcoded in the pipeline; the chosen values are
 stored on the `rounds` row and model_versions.train_config, so every round
@@ -86,6 +88,7 @@ class RoundExecution(_Strict):
 
     @model_validator(mode="after")
     def _train_or_model(self) -> "RoundExecution":
-        if (self.train is None) == (self.model is None):
-            raise ValueError("a round execution has either `train` or `model`")
+        # Neither: a random round that needs no scores, so no model and no worker.
+        if self.train is not None and self.model is not None:
+            raise ValueError("a round execution has `train` or `model`, not both")
         return self

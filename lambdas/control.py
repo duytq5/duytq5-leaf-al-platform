@@ -92,6 +92,10 @@ def start_round(conn: psycopg.Connection, ev: StartRound) -> dict[str, Any]:
             params=recipe.params.model_dump(mode="json"),
             base_model=cfg.train.base_model,
         )
+    elif not strategy.requires:
+        # A random round without `train` needs no scores: it scores only with
+        # a named model (its scores become Label Studio predictions).
+        score_model = cfg.model
     else:
         # A selection-only round (change 24) scores with an existing model.
         score_model = cfg.model or _newest_model(conn, dataset[0])

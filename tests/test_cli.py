@@ -36,12 +36,16 @@ def test_check_round_without_train(tmp_path, capsys):
     head, rest = text.split("train:\n", 1)
     selection_only = head + "selection:" + rest.split("selection:", 1)[1]
     path = tmp_path / "round.yaml"
+    # The example's strategy is random: it needs no scores, so no model.
     path.write_text(selection_only)
     assert main(["check-round", os.fspath(path)]) == 0
-    assert "no training, scores with the newest model" in capsys.readouterr().out
+    assert "no training, no scoring" in capsys.readouterr().out
     path.write_text(selection_only + "model: models:/rocole-fastvit@champion\n")
     assert main(["check-round", os.fspath(path)]) == 0
     assert "scores with models:/rocole-fastvit@champion" in capsys.readouterr().out
+    path.write_text(selection_only.replace("strategy: random", "strategy: margin"))
+    assert main(["check-round", os.fspath(path)]) == 0
+    assert "no training, scores with the newest model" in capsys.readouterr().out
 
 
 def test_check_training(tmp_path, capsys):

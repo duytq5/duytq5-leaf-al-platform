@@ -163,6 +163,28 @@ def test_a_selection_only_round_defaults_to_the_newest_model(env):
     assert _score_model(conn, out) == "models:/toy/2"
 
 
+def test_a_random_round_without_train_needs_no_model(env):
+    """Random needs no scores: no model, no score job, straight to labeling."""
+    conn, _ = env
+    random_only = {**SELECTION_ONLY, "selection": {"strategy": "random", "k": 3}}
+    _model(conn, 1)  # even when the dataset has a model, random does not score
+    out = _start(conn, config=random_only)
+    assert (out["execution"]["train"], out["execution"]["model"]) == (None, None)
+    assert _score_model(conn, out) is None
+    # A named model is used: its scores become Label Studio predictions.
+    conn.execute("UPDATE rounds SET status = 'cancelled'")
+    out = _start(
+        conn, config={**random_only, "model": "models:/toy/1"}, path="configs/rounds/b.yaml"
+    )
+    assert out["execution"]["model"] == "models:/toy/1"
+
+
+def test_a_random_round_without_train_on_a_dataset_with_no_model(env):
+    conn, _ = env
+    out = _start(conn, config={**SELECTION_ONLY, "selection": {"strategy": "random", "k": 3}})
+    assert out["execution"]["model"] is None
+
+
 def test_a_selection_only_round_needs_a_model(env):
     conn, _ = env
     with pytest.raises(control.BadRound, match="no model"):
