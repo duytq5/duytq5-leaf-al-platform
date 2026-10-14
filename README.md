@@ -14,13 +14,14 @@ uploads images and downloads ONNX models.
 | `selection/` | Selection strategy registry (`@register("name")`) and the built-in strategies |
 | `worker/` | Local GPU worker: long-polls SQS, runs `train` / `score` / `export` jobs |
 | `api/` | Edge and Admin API: one FastAPI Lambda behind the HTTP API (`/v1/me`, public `/v1/crops` and `/v1/devices/config`, uploads through `/v1/captures`; read-only `/v1/rounds/...` for labelers and admins, `/v1/datasets/{name}/versions` for admins) |
-| `lambdas/` | Lambda handlers: the `al-round` steps (`round.py`), the label step and Label Studio webhook (`labeling.py`, `label_studio_hook.py`), upload validation (`upload.py`) |
+| `lambdas/` | Lambda handlers: the `al-round` steps (`round.py`), the label step and Label Studio webhook (`labeling.py`, `label_studio_hook.py`), upload validation (`upload.py`), the `model-release` steps (`release.py`) |
 | `infra/` | AWS CDK app (Python), one stack: `LeafAlPlatform` |
 | `deploy/ec2/` | Docker Compose for the single EC2 instance: Postgres, MLflow, Label Studio behind Caddy and oauth2-proxy |
 | `cli/` | Operator CLI `al` |
 | `configs/datasets/` | YAML dataset configs: the class list (code + display name) and the fixed train/val/test split |
 | `configs/train/` | YAML training configs |
 | `configs/rounds/` | YAML round configs: strategy, its parameters and k, chosen by a human per round |
+| `configs/releases/` | One YAML per dataset: the model version the app gets (`al check-release` validates them) |
 | `tests/` | Unit tests |
 
 ## Development

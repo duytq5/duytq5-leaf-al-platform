@@ -11,6 +11,12 @@ Probability = Annotated[float, Field(ge=0.0, le=1.0)]
 ClassCode = Annotated[str, StringConstraints(pattern=r"^[a-z0-9][a-z0-9_]*$", max_length=64)]
 # Machine name of a crop (crops.code), e.g. coffee, durian.
 CropCode = Annotated[str, StringConstraints(pattern=r"^[a-z0-9][a-z0-9_]*$", max_length=64)]
+# A registered model's name in MLflow; also a path segment of edge/{model}/{version}/.
+ModelName = Annotated[
+    str, StringConstraints(pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]*$", max_length=100)
+]
+# A GitHub login: the person who merged a round or release.
+GitHubLogin = Annotated[str, StringConstraints(pattern=r"^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$")]
 # Full Git commit SHA of the merge to main that started a round or a release.
 CommitSha = Annotated[str, StringConstraints(pattern=r"^[0-9a-f]{40}$")]
 # Worker image GitHub Actions built for that commit; every job runs in it.

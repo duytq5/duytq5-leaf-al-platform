@@ -164,7 +164,11 @@ def test_webhook_route_has_no_jwt_but_everything_else_does(t):
 
 
 def test_label_step_is_retried_while_label_studio_restarts(t):
-    (machine,) = t.find_resources("AWS::StepFunctions::StateMachine").values()
+    (machine,) = [
+        m
+        for m in t.find_resources("AWS::StepFunctions::StateMachine").values()
+        if m["Properties"]["StateMachineName"] == "al-round"
+    ]
     parts = machine["Properties"]["DefinitionString"]["Fn::Join"][1]
     states = json.loads("".join(p if isinstance(p, str) else "ref" for p in parts))["States"]
     errors = [e for r in states["AwaitLabels"]["Retry"] for e in r["ErrorEquals"]]

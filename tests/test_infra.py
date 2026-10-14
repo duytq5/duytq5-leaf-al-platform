@@ -140,6 +140,19 @@ def test_worker_policy_is_scoped(full):
     assert "/raw/*" not in written and "/manifests/*" not in written
 
 
+def test_worker_may_publish_exported_models(full):
+    """The export job (F5) checks for edge/{model}/{version}/manifest.json and
+    writes model.onnx and manifest.json; it never deletes there."""
+    statements = _statements(full, "WorkerPolicy")
+    (edge,) = [s for s in statements if s.get("Sid") == "PublishModels"]
+    assert sorted(_actions(edge)) == ["s3:GetObject", "s3:PutObject"]
+    assert "ModelsBucket" in json.dumps(edge["Resource"]) and "/edge/*" in json.dumps(
+        edge["Resource"]
+    )
+    (listing,) = [s for s in statements if s.get("Sid") == "ListMlflowArtifacts"]
+    assert "edge/*" in listing["Condition"]["StringLike"]["s3:prefix"]
+
+
 def test_worker_policy_fits_iam_limits(full):
     # IAM caps a user's inline policies at 2,048 characters, which the worker
     # outgrew (CREATE_FAILED on the first real deploy). Managed policies allow
@@ -296,20 +309,27 @@ def test_round_lambdas_run_in_the_lambda_subnet(full):
         assert "DATABASE_URL" not in env
 
 
-def _definition(template: Template) -> dict:
-    (machine,) = template.find_resources("AWS::StepFunctions::StateMachine").values()
-    assert machine["Properties"]["StateMachineName"] == "al-round"
+def _definition(template: Template, name: str = "al-round") -> dict:
+    (machine,) = [
+        m
+        for m in template.find_resources("AWS::StepFunctions::StateMachine").values()
+        if m["Properties"]["StateMachineName"] == name
+    ]
     parts = machine["Properties"]["DefinitionString"]["Fn::Join"][1]
     return json.loads("".join(p if isinstance(p, str) else "ref" for p in parts))
 
 
-def test_round_state_machine_runs_the_f4_steps_in_order(full):
-    states = _definition(full)["States"]
-    order, name = [], _definition(full)["StartAt"]
+def _order(definition: dict) -> list[str]:
+    states, order, name = definition["States"], [], definition["StartAt"]
     while name in states and states[name].get("Next"):
         order.append(name)
         name = states[name]["Next"]
-    order.append(name)
+    return [*order, name]
+
+
+def test_round_state_machine_runs_the_f4_steps_in_order(full):
+    states = _definition(full)["States"]
+    order = _order(_definition(full))
     assert order == [
         "MarkRunning", "Snapshot", "Train", "Score", "Select", "AwaitLabels", "Merge",
         "RoundSucceeded",
@@ -342,6 +362,61 @@ def test_state_machine_arn_is_in_ssm(full):
     full.has_resource_properties(
         "AWS::SSM::Parameter", {"Name": "/leaf-al/state-machines/al-round"}
     )
+
+
+# model-release (design doc F5)
+
+
+def test_release_lambdas_run_in_the_lambda_subnet(full):
+    functions = {
+        k: v["Properties"]
+        for k, v in full.find_resources("AWS::Lambda::Function").items()
+        if k.startswith("ModelRelease")
+    }
+    assert {p["Handler"] for p in functions.values()} == {
+        "lambdas.release.prepare_handler",
+        "lambdas.release.record_handler",
+    }
+    for props in functions.values():
+        assert props["VpcConfig"]["SubnetIds"] == [{"Ref": "LambdaSubnet"}]
+        env = props["Environment"]["Variables"]
+        assert env["PG_HOSTADDR"] == {"Fn::GetAtt": ["HostB4E45AD7", "PrivateIp"]}
+        assert "{{resolve:secretsmanager:leaf-al/postgres-password" in json.dumps(
+            env["PG_PASSWORD"]
+        )
+
+
+def test_release_prepares_exports_then_records(full):
+    definition = _definition(full, "model-release")
+    states = definition["States"]
+    assert _order(definition) == ["Prepare", "Export", "Record", "ReleaseSucceeded"]
+    for step in ("Prepare", "Export", "Record"):
+        assert states[step]["Catch"][0]["Next"] == "ReleaseFailed"
+    assert states["ReleaseFailed"]["Type"] == "Fail"
+
+
+def test_release_waits_for_the_export_job(full):
+    states = _definition(full, "model-release")["States"]
+    export = states["Export"]
+    assert export["Resource"].endswith(":states:::sqs:sendMessage.waitForTaskToken")
+    body = export["Parameters"]["MessageBody"]
+    assert body["type"] == "export"
+    assert body["task_token.$"] == "$$.Task.Token"
+    assert body["job_id.$"] == "$.prepare.job_id"
+    assert body["image.$"] == "$.prepare.image"
+    assert body["spec.$"] == "$.prepare.spec"
+    # The release workflow waits as long as a GitHub job may run.
+    assert export["TimeoutSeconds"] == 6 * 3600
+    record = states["Record"]["Parameters"]
+    assert record["export.$"] == "$.export"
+    assert record["commit_sha.$"] == "$.commit_sha"
+
+
+def test_release_state_machine_arn_is_in_ssm(full):
+    full.has_resource_properties(
+        "AWS::SSM::Parameter", {"Name": "/leaf-al/state-machines/model-release"}
+    )
+    assert "ModelReleaseStateMachineArn" in full.to_json()["Outputs"]
 
 
 def test_budget_only_with_email(full, bare):

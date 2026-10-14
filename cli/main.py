@@ -8,6 +8,7 @@ from pydantic import ValidationError
 
 from common.config import TrainConfig
 from common.dataset import CropsConfig, DatasetConfig
+from common.release import RELEASES_DIR, ReleaseFile
 from common.round import RoundConfig
 from selection import describe_strategies, from_config
 
@@ -38,6 +39,29 @@ def cmd_check_round(args: argparse.Namespace) -> int:
         f"needs={sorted(strategy.requires) or 'nothing'}"
     )
     return 0
+
+
+def cmd_check_release(args: argparse.Namespace) -> int:
+    """Validate every configs/releases/{dataset}.yaml (run from the repo root)."""
+    paths = sorted(RELEASES_DIR.glob("*.yaml"))
+    if not paths:
+        print(f"no release files in {RELEASES_DIR}")
+        return 0
+    failed = False
+    for path in paths:
+        try:
+            name, release = ReleaseFile.from_yaml(path)
+        except (OSError, ValidationError) as e:
+            print(f"{path}: {e}")
+            failed = True
+            continue
+        dataset = Path("configs/datasets") / f"{name}.yaml"
+        if not dataset.is_file():
+            print(f"{path}: no dataset {name} ({dataset} does not exist)")
+            failed = True
+            continue
+        print(f"ok: {name} -> {release.model}/{release.version}")
+    return 1 if failed else 0
 
 
 def cmd_db_migrate(args: argparse.Namespace) -> int:
@@ -111,6 +135,7 @@ def main(argv: list[str] | None = None) -> int:
     sub.add_parser("strategies", help="list strategies, required inputs and parameters")
     check = sub.add_parser("check-round", help="validate a round config YAML")
     check.add_argument("config")
+    sub.add_parser("check-release", help="validate configs/releases/*.yaml")
 
     db = sub.add_parser("db", help="database commands (needs DATABASE_URL)")
     db_sub = db.add_subparsers(dest="db_command", required=True)
@@ -130,7 +155,12 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     if args.command == "db":
         return {"migrate": cmd_db_migrate}[args.db_command](args)
-    handlers = {"strategies": cmd_strategies, "check-round": cmd_check_round, "seed": cmd_seed}
+    handlers = {
+        "strategies": cmd_strategies,
+        "check-round": cmd_check_round,
+        "check-release": cmd_check_release,
+        "seed": cmd_seed,
+    }
     return handlers[args.command](args)
 
 
