@@ -297,6 +297,72 @@ def test_uncertainty_strategy_asks_only_for_probs(env):
     assert steps.select(conn, store, rid) == {"selected": 3}
 
 
+def test_a_selection_only_round_scores_selects_and_merges_without_a_model(env):
+    """Change 24: no train job; the score job uses the round's model and the
+    merge makes the next dataset version and no model_versions row."""
+    conn, store = env
+    rid = _round(conn)
+    run = RoundExecution(round_id=rid, image=IMAGE, model="models:/toy@champion")
+    steps.mark_running(conn, rid)
+    out = steps.snapshot(conn, store, run)
+    assert "train" not in out
+    assert out["score"]["model_uri"] == "models:/toy@champion"
+    assert out["score"]["job_id"] == str(job_uuid(rid, JobType.SCORE))
+    assert manifest_key("toy", 0) not in store.objects  # nothing to train on
+    _score_pool(store, rid)
+    assert steps.select(conn, store, rid) == {"selected": 3}
+    chosen = json.loads(store.objects[selection_key(rid)])["image_ids"]
+    for i in chosen:
+        _label(conn, i, "a", rid)
+
+    assert steps.merge(conn, store, run, None)["version"] == 1
+    assert steps.merge(conn, store, run, None)["version"] == 1  # a retry
+    assert _status(conn, rid) == "succeeded"
+    assert set(_image_status(conn, chosen).values()) == {"labeled"}
+    assert conn.execute("SELECT count(*) FROM model_versions").fetchone()[0] == 0
+    assert conn.execute("SELECT metrics FROM rounds WHERE id = %s", (rid,)).fetchone()[0] is None
+
+
+def test_a_round_that_trains_needs_the_train_result(env):
+    conn, store = env
+    rid = _round(conn)
+    _to_selection(conn, store, rid)
+    with pytest.raises(steps.RoundError, match="no train result"):
+        steps.merge(conn, store, _run(rid), None)
+    assert _status(conn, rid) == "running"
+
+
+def test_merge_handler_reads_the_whole_execution_state(env, monkeypatch):
+    """The Merge state passes its whole input: a round that skipped Train has
+    no train_result in it."""
+    conn, store = env
+    rid = _round(conn)
+    run = RoundExecution(round_id=rid, image=IMAGE, model="models:/toy/1")
+    steps.mark_running(conn, rid)
+    snap = steps.snapshot(conn, store, run)
+    _score_pool(store, rid)
+    steps.select(conn, store, rid)
+
+    class _Conn:
+        def __enter__(self):
+            return conn
+
+        def __exit__(self, *exc):
+            return False
+
+    monkeypatch.setattr(steps, "open_db", _Conn)
+    monkeypatch.setattr(steps, "_store", lambda: store)
+    state = {
+        **run.model_dump(mode="json"),
+        "round": {"k": 3},
+        "snapshot": snap,
+        "scoring": {"model_uri": "models:/toy/1"},
+        "score_result": {"output_uri": "x", "n_images": 1},
+        "select": {"selected": 3},
+    }
+    assert steps.merge_handler(state, None)["version"] == 1
+
+
 def test_lambda_connection_checks_the_certificate_name(monkeypatch, tmp_path):
     from psycopg.conninfo import conninfo_to_dict
 

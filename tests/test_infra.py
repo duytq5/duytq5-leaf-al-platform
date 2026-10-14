@@ -328,16 +328,34 @@ def _order(definition: dict) -> list[str]:
 
 
 def test_round_state_machine_runs_the_f4_steps_in_order(full):
-    states = _definition(full)["States"]
-    order = _order(_definition(full))
-    assert order == [
-        "MarkRunning", "Snapshot", "Train", "Score", "Select", "AwaitLabels", "Merge",
-        "RoundSucceeded",
+    definition = _definition(full)
+    states = definition["States"]
+    # A round that trains (the default branch of the Choice).
+    assert _order(definition)[:3] == ["MarkRunning", "Snapshot", "TrainOrNot"]
+    trains = _order({**definition, "StartAt": states["TrainOrNot"]["Default"]})
+    assert trains == [
+        "Train", "UseTrainedModel", "Score", "Select", "AwaitLabels", "Merge", "RoundSucceeded",
     ]  # fmt: skip
-    for step in order[:-1]:
+    for step in ["MarkRunning", "Snapshot", "Train", "Score", "Select", "AwaitLabels", "Merge"]:
         assert states[step]["Catch"][0]["Next"] == "MarkFailed"
     assert states["MarkFailed"]["Next"] == "RoundFailed"
     assert states["RoundFailed"]["Type"] == "Fail"
+
+
+def test_a_round_without_train_skips_the_train_job(full):
+    """Change 24: a selection-only round (execution input `train` is null)
+    scores with the round's model."""
+    states = _definition(full)["States"]
+    (choice,) = states["TrainOrNot"]["Choices"]
+    assert choice == {"Variable": "$.train", "IsNull": True, "Next": "UseRoundModel"}
+    assert states["UseRoundModel"]["Next"] == "Score"
+    assert states["UseRoundModel"]["Parameters"] == {"model_uri.$": "$.snapshot.score.model_uri"}
+    assert states["UseTrainedModel"]["Parameters"] == {"model_uri.$": "$.train_result.model_uri"}
+    for name in ("UseRoundModel", "UseTrainedModel"):
+        assert states[name]["ResultPath"] == "$.scoring"
+    # Merge gets the whole state: train_result only exists when Train ran.
+    # Invoked by function ARN with no Parameters: the event is the whole state.
+    assert "Parameters" not in states["Merge"] and states["Merge"]["Resource"] == "ref"
 
 
 def test_round_waits_for_the_worker_and_the_labels(full):
@@ -351,7 +369,7 @@ def test_round_waits_for_the_worker_and_the_labels(full):
         assert "HeartbeatSeconds" not in states[job]
         assert states[job]["TimeoutSeconds"] == 14 * 24 * 3600
     assert states["Score"]["Parameters"]["MessageBody"]["spec"]["model_uri.$"] == (
-        "$.train_result.model_uri"
+        "$.scoring.model_uri"
     )
     labels = states["AwaitLabels"]
     assert labels["Resource"].endswith(":states:::lambda:invoke.waitForTaskToken")

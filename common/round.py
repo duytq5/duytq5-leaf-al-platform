@@ -2,7 +2,9 @@
 ops repo (example: configs/examples/round.yaml).
 
 The owner explores the data, then picks the training recipe and the selection
-strategy, their parameters and k for each round. Merging the file to the ops
+strategy, their parameters and k for each round. A round without `train` only
+selects (design doc change 24): it scores the pool with `model`, or with the
+dataset's newest model, and training runs later as its own job. Merging the file to the ops
 repo's main starts the round (design doc, "Control through GitHub"). Nothing about
 training or selection is hardcoded in the pipeline; the chosen values are
 stored on the `rounds` row and model_versions.train_config, so every round
@@ -14,12 +16,12 @@ from typing import Annotated, Any
 from uuid import UUID
 
 import yaml
-from pydantic import BaseModel, ConfigDict, Field, StringConstraints
+from pydantic import BaseModel, ConfigDict, Field, StringConstraints, model_validator
 
 from common.types import DatasetName, WorkerImage
 
-# A registered MLflow model to fine-tune from: a version or an alias,
-# e.g. models:/rocole-fastvit/3 or models:/rocole-fastvit@champion.
+# A registered MLflow model (to fine-tune from, or to score with): a version
+# or an alias, e.g. models:/rocole-fastvit/3 or models:/rocole-fastvit@champion.
 BaseModelUri = Annotated[
     str,
     StringConstraints(
@@ -50,8 +52,17 @@ class RoundConfig(_Strict):
     dataset: DatasetName
     # The dataset version to train on; None: the latest.
     base_version: int | None = Field(default=None, ge=0)
-    train: TrainSection
+    # None: a selection-only round, scored with `model`.
+    train: TrainSection | None = None
+    # Only without `train`; None: the dataset's newest model_versions row.
+    model: BaseModelUri | None = None
     selection: SelectionConfig
+
+    @model_validator(mode="after")
+    def _model_only_without_train(self) -> "RoundConfig":
+        if self.train is not None and self.model is not None:
+            raise ValueError("a round that trains scores with its own model; drop `model`")
+        return self
 
     @classmethod
     def from_yaml(cls, path: str | Path) -> "RoundConfig":
@@ -64,9 +75,17 @@ class RoundExecution(_Strict):
 
     Everything else (dataset, base version, strategy, k, seed) is on the
     `rounds` row. `train` is the round config's training section, sent to the
-    worker in the train job and stored on model_versions.train_config.
+    worker in the train job and stored on model_versions.train_config. A
+    selection-only round has no `train` and scores with `model` instead.
     """
 
     round_id: UUID
     image: WorkerImage
-    train: TrainSection
+    train: TrainSection | None = None
+    model: BaseModelUri | None = None
+
+    @model_validator(mode="after")
+    def _train_or_model(self) -> "RoundExecution":
+        if (self.train is None) == (self.model is None):
+            raise ValueError("a round execution has either `train` or `model`")
+        return self

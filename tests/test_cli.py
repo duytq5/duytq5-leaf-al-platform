@@ -30,6 +30,20 @@ def test_check_round_ok(capsys):
     assert capsys.readouterr().out.startswith("ok:")
 
 
+def test_check_round_without_train(tmp_path, capsys):
+    """Change 24: a selection-only round, with or without its scoring model."""
+    text = (ROOT / "configs/examples/round.yaml").read_text()
+    head, rest = text.split("train:\n", 1)
+    selection_only = head + "selection:" + rest.split("selection:", 1)[1]
+    path = tmp_path / "round.yaml"
+    path.write_text(selection_only)
+    assert main(["check-round", os.fspath(path)]) == 0
+    assert "no training, scores with the newest model" in capsys.readouterr().out
+    path.write_text(selection_only + "model: models:/rocole-fastvit@champion\n")
+    assert main(["check-round", os.fspath(path)]) == 0
+    assert "scores with models:/rocole-fastvit@champion" in capsys.readouterr().out
+
+
 def test_recipes_command(capsys):
     assert main(["recipes"]) == 0
     assert '"timm_classifier"' in capsys.readouterr().out

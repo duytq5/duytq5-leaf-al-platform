@@ -604,3 +604,12 @@ def test_rounds_have_no_mode(conn):
         )
     }
     assert "mode" not in columns and {"strategy", "k", "commit_sha"} <= columns
+
+
+def test_rounds_record_their_scoring_model(conn):
+    """Change 24: migration 0004 adds rounds.score_model (selection-only rounds)."""
+    (nullable,) = conn.execute(
+        "SELECT is_nullable FROM information_schema.columns"
+        " WHERE table_name = 'rounds' AND column_name = 'score_model'"
+    ).fetchone()
+    assert nullable == "YES"
