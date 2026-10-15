@@ -181,6 +181,7 @@ class FakeRun:
 
     def __call__(self, cmd, **kw):
         self.commands.append(cmd)
+        self.kw = kw
         out = next(c.split(":")[0] for c in cmd if c.endswith(":/out"))
         if self.result is not None:
             with open(f"{out}/result.json", "w") as f:
@@ -229,6 +230,14 @@ def test_a_container_that_fails_is_a_failed_job(tmp_path):
     run = FakeRun(returncode=1, logs="line\n" * 500 + "CUDA out of memory")
     with pytest.raises(JobFailed, match="CUDA out of memory"):
         _runner(tmp_path, run).run(parse_job(json.dumps(_job())))
+
+
+def test_the_job_output_is_read_as_utf8_whatever_the_host_code_page(tmp_path):
+    from common.jobs import parse_job
+
+    run = FakeRun(result={})
+    _runner(tmp_path, run).run(parse_job(json.dumps(_job())))
+    assert run.kw["encoding"] == "utf-8" and run.kw["errors"] == "replace"
 
 
 def test_a_container_without_a_result_is_a_failed_job(tmp_path):
