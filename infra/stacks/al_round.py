@@ -1,8 +1,9 @@
 """The al-round state machine (design doc F4) and its Lambdas.
 
   MarkRunning -> Snapshot -> Train (SQS job) -> Score (SQS job) -> Select
-  -> AwaitLabels -> Merge -> done
+  -> AwaitLabels -> Merge -> CloseLabelProject -> done
   any error -> Fail (round failed, queued images back to the pool)
+  CloseLabelProject error -> LabelProjectNotClosed (the round stays succeeded)
 
 A selection-only round (execution input `train` is null, design doc change 24)
 skips Train and scores with the round's own `model`; a random round with no
@@ -11,7 +12,9 @@ model (`model` null too) skips Score as well and selects from the pool list.
 AwaitLabels (lambdas/labeling.py) puts the selected images into the round's
 Label Studio project and waits; RecordLabelFn stores each submitted label for
 the webhook Lambda outside the VPC (infra/stacks/platform.py), which resumes
-the round once all k images are done.
+the round once all k images are done. Once merged, CloseLabelProject exports
+the project to labelstudio/<round id>.json in the data bucket (kept, no
+expiry) and deletes it from Label Studio.
 
 Execution input: {round_id, image, train, model} (common.round.RoundExecution); the
 start-round Lambda sets it. The execution name is the round id.
@@ -104,6 +107,14 @@ class AlRound(Construct):
             extra_environment=label_studio_environment,
         )
         merge = step("MergeFn", "merge_handler", timeout=120)
+        close_project = step(
+            "CloseLabelProjectFn",
+            "close_handler",
+            timeout=120,  # export, put, read back, delete
+            memory=1024,
+            module="labeling",
+            extra_environment=label_studio_environment,
+        )
         fail = step("FailFn", "fail_handler")
 
         # S3 access by prefix (common/s3keys.py).
@@ -115,6 +126,8 @@ class AlRound(Construct):
             data_bucket.grant_read(fn, "selections/*")
         for prefix in ("selections/*", "scores/*"):
             data_bucket.grant_read(await_labels, prefix)
+        data_bucket.grant_put(close_project, "labelstudio/*")
+        data_bucket.grant_read(close_project, "labelstudio/*")
 
         def invoke(name: str, fn: lambda_.IFunction, payload: dict, result_path: str):
             task = tasks.LambdaInvoke(
@@ -197,6 +210,24 @@ class AlRound(Construct):
             errors=TRANSIENT_ERRORS, interval=Duration.seconds(10), max_attempts=3, backoff_rate=2
         )
 
+        close = invoke("CloseLabelProject", close_project, round_id, "$.close")
+        close.add_retry(
+            errors=["LabelStudioError"],
+            interval=Duration.seconds(30),
+            max_attempts=4,
+            backoff_rate=2,
+        )
+        # The round succeeded already, so no MarkFailed; the execution still
+        # fails so the leftover project shows.
+        close.add_catch(
+            sfn.Fail(
+                self,
+                "LabelProjectNotClosed",
+                cause="round succeeded; its Label Studio project was not archived and deleted",
+            ),
+            result_path="$.error",
+        )
+
         def scoring_model(name: str, path: str) -> sfn.Pass:
             return sfn.Pass(
                 self,
@@ -211,7 +242,9 @@ class AlRound(Construct):
         for s in (mark, snap, train, score, select_, labels, merge_):
             s.add_catch(failed, result_path="$.error")
 
-        score.next(select_).next(labels).next(merge_).next(sfn.Succeed(self, "RoundSucceeded"))
+        score.next(select_).next(labels).next(merge_).next(close).next(
+            sfn.Succeed(self, "RoundSucceeded")
+        )
         chain = (
             sfn.Chain.start(mark)
             .next(snap)

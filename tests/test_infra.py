@@ -320,6 +320,7 @@ def test_round_lambdas_run_in_the_lambda_subnet(full):
         ),
         "lambdas.labeling.start_handler",
         "lambdas.labeling.record_handler",
+        "lambdas.labeling.close_handler",
     }
     for props in functions.values():
         assert props["Runtime"] == "python3.12"
@@ -359,12 +360,52 @@ def test_round_state_machine_runs_the_f4_steps_in_order(full):
     assert _order(definition)[:3] == ["MarkRunning", "Snapshot", "TrainOrNot"]
     trains = _order({**definition, "StartAt": states["TrainOrNot"]["Default"]})
     assert trains == [
-        "Train", "UseTrainedModel", "Score", "Select", "AwaitLabels", "Merge", "RoundSucceeded",
+        "Train", "UseTrainedModel", "Score", "Select", "AwaitLabels", "Merge",
+        "CloseLabelProject", "RoundSucceeded",
     ]  # fmt: skip
     for step in ["MarkRunning", "Snapshot", "Train", "Score", "Select", "AwaitLabels", "Merge"]:
         assert states[step]["Catch"][0]["Next"] == "MarkFailed"
     assert states["MarkFailed"]["Next"] == "RoundFailed"
     assert states["RoundFailed"]["Type"] == "Fail"
+
+
+def test_a_merged_round_closes_its_label_studio_project(full):
+    states = _definition(full)["States"]
+    close = states["CloseLabelProject"]
+    assert close["Parameters"] == {"round_id.$": "$.round_id"}
+    errors = [e for r in close["Retry"] for e in r["ErrorEquals"]]
+    assert "LabelStudioError" in errors
+    # The round already succeeded: a failure here must not mark it failed,
+    # but the execution fails so it shows.
+    (catch,) = close["Catch"]
+    assert catch["Next"] == "LabelProjectNotClosed"
+    assert states["LabelProjectNotClosed"]["Type"] == "Fail"
+
+
+def test_the_close_step_may_only_write_label_studio_exports(full):
+    statements = [
+        s
+        for k, p in full.find_resources("AWS::IAM::Policy").items()
+        if k.startswith("AlRoundCloseLabelProjectFn")
+        for s in p["Properties"]["PolicyDocument"]["Statement"]
+    ]
+    writes = [s for s in statements if "s3:PutObject" in json.dumps(s["Action"])]
+    assert writes
+    for s in writes:
+        assert json.dumps(s["Resource"]).endswith('"/labelstudio/*"]]}')
+        assert "s3:DeleteObject" not in json.dumps(s["Action"])
+
+
+def test_label_studio_exports_never_expire(full):
+    rules = [
+        r
+        for b in full.find_resources("AWS::S3::Bucket").values()
+        for r in b["Properties"].get("LifecycleConfiguration", {}).get("Rules", [])
+    ]
+    expiring = [r for r in rules if "ExpirationInDays" in r]
+    assert expiring
+    # Each expiry is scoped to a prefix (backups/, incoming/), none to labelstudio/.
+    assert all(r.get("Prefix") and not "labelstudio/".startswith(r["Prefix"]) for r in expiring)
 
 
 def test_a_round_without_train_skips_the_train_job(full):
