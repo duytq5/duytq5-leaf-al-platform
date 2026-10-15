@@ -435,7 +435,11 @@ Task images come from presigned links to `raw/` in the data bucket. The
 bucket's CORS rule lets only the Label Studio domain load them. If a task
 shows "There was an issue loading URL from `$image`", check that rule with
 `aws s3api get-bucket-cors --bucket <DataBucketName>`, and deploy again
-after a change of `labelStudioDomain`.
+after a change of `labelStudioDomain`. If S3 answers
+`AuthorizationQueryParametersError ... the region 'us-east-1' is wrong`, the
+project's S3 storage has no region: set Region name to `ap-southeast-2` in the
+project's Settings, Cloud Storage (no sync needed). The label step sets it for
+new projects.
 
 If the label step fails with `LabelStudioError`, the instance was probably
 stopped or Label Studio was restarting; the step retries for a few minutes on

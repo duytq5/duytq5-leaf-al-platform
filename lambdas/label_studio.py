@@ -18,6 +18,7 @@ too, and it should start fast.
 """
 
 import json
+import os
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
@@ -185,12 +186,15 @@ class LabelStudio:
 
     def add_s3_storage(self, project_id: int, bucket: str, prefix: str) -> None:
         # No keys: Label Studio uses the instance role. Never synced; it only
-        # signs the s3:// links of imported tasks.
+        # signs the s3:// links of imported tasks. Without region_name it signs
+        # for us-east-1, and S3 refuses the links of a bucket in another
+        # region; the bucket is in this Lambda's region.
         body = {
             "project": project_id,
             "title": "raw images",
             "bucket": bucket,
             "prefix": prefix,
+            "region_name": os.environ["AWS_REGION"],
             "presign": True,
             "presign_ttl": 15,
             "use_blob_urls": False,
