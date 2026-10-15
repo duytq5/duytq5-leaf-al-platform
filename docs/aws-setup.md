@@ -431,6 +431,12 @@ to the `labels` table; when all k images are done the round goes on to merge
 and the project is renamed `DONE ...`. Edits after submit are not recorded,
 and skipping is turned off, so each task needs an answer.
 
+Task images come from presigned links to `raw/` in the data bucket. The
+bucket's CORS rule lets only the Label Studio domain load them. If a task
+shows "There was an issue loading URL from `$image`", check that rule with
+`aws s3api get-bucket-cors --bucket <DataBucketName>`, and deploy again
+after a change of `labelStudioDomain`.
+
 If the label step fails with `LabelStudioError`, the instance was probably
 stopped or Label Studio was restarting; the step retries for a few minutes on
 its own. Check the containers with `scripts/ec2.sh shell`, then
