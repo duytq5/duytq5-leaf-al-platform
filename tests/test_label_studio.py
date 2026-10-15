@@ -156,6 +156,20 @@ def test_client_sends_the_token_and_json():
     }
 
 
+def test_s3_storage_signs_for_the_bucket_region(monkeypatch):
+    monkeypatch.setenv("AWS_REGION", "ap-southeast-2")
+    opener = FakeOpener([{"id": 3}])
+    client = ls.LabelStudio("http://10.0.1.5:8080/", "tok", opener=opener)
+    client.add_s3_storage(7, "data-bucket", "raw/")
+    (req,) = opener.requests
+    assert req.full_url == "http://10.0.1.5:8080/api/storages/s3/"
+    body = json.loads(req.data)
+    # Without it, Label Studio signs for us-east-1 and S3 refuses the image.
+    assert body["region_name"] == "ap-southeast-2"
+    assert body["presign"] is True
+    assert (body["project"], body["bucket"], body["prefix"]) == (7, "data-bucket", "raw/")
+
+
 def test_client_reads_paginated_and_plain_lists():
     opener = FakeOpener([{"count": 1, "results": [{"id": 1}]}, [{"id": 2}]])
     client = ls.LabelStudio("http://ls:8080", "tok", opener=opener)
