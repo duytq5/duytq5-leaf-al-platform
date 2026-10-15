@@ -97,6 +97,31 @@ def test_only_models_bucket_is_versioned(full):
     assert len(versioned) == 1
 
 
+def test_only_label_studio_may_read_the_data_bucket_cross_origin(full):
+    # Label Studio loads each task image from a presigned raw/ link.
+    cors = {
+        name: b["Properties"]["CorsConfiguration"]["CorsRules"]
+        for name, b in full.find_resources("AWS::S3::Bucket").items()
+        if "CorsConfiguration" in b["Properties"]
+    }
+    ((name, (rule,)),) = cors.items()
+    assert name.startswith("DataBucket")
+    assert sorted(rule["AllowedMethods"]) == ["GET", "HEAD"]
+    (origin,) = rule["AllowedOrigins"]
+    assert "sslip.io" in json.dumps(origin)
+
+
+def test_the_label_studio_domain_sets_the_cors_origin():
+    template = _template(labelStudioDomain="label.example.org")
+    (bucket,) = [
+        b
+        for b in template.find_resources("AWS::S3::Bucket").values()
+        if "CorsConfiguration" in b["Properties"]
+    ]
+    (rule,) = bucket["Properties"]["CorsConfiguration"]["CorsRules"]
+    assert rule["AllowedOrigins"] == ["https://label.example.org"]
+
+
 def test_job_queue_has_dlq_and_long_polling(full):
     # The job queue and its DLQ, and the upload queue and its DLQ (tests/test_upload_infra.py).
     full.resource_count_is("AWS::SQS::Queue", 4)

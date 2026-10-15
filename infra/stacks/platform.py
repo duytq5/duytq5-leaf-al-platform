@@ -515,6 +515,15 @@ class PlatformStack(Stack):
         self.label_studio_domain = (
             self.node.try_get_context("labelStudioDomain") or f"{eip.attr_public_ip}.sslip.io"
         )
+        # Label Studio shows each task image from a presigned link to raw/ in
+        # the data bucket, loaded cross-origin from its own page: the browser
+        # refuses the image without this rule. Only GET, only from Label Studio.
+        self.data_bucket.add_cors_rule(
+            allowed_methods=[s3.HttpMethods.GET, s3.HttpMethods.HEAD],
+            allowed_origins=[f"https://{self.label_studio_domain}"],
+            allowed_headers=["*"],
+            max_age=3600,
+        )
         # The image viewer (FiftyOne) on the same host and Caddy.
         self.viewer_domain = (
             self.node.try_get_context("viewerDomain") or f"view.{eip.attr_public_ip}.sslip.io"
