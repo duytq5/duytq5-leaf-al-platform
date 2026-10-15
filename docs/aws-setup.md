@@ -427,9 +427,21 @@ You never create projects by hand. When a round reaches its label step, the
 step makes a project named `ACTIVE <dataset> <round id>` with one task per
 selected image and the round model's guess preselected. Labelers confirm or
 correct each one, or pick "Không phải lá" (not a leaf). Every submit is copied
-to the `labels` table; when all k images are done the round goes on to merge
-and the project is renamed `DONE ...`. Edits after submit are not recorded,
-and skipping is turned off, so each task needs an answer.
+to the `labels` table, with the labeler's Label Studio email in `labeled_by`;
+when all k images are done the project is renamed `DONE ...` and the round
+goes on to merge. Edits after submit are not recorded, and skipping is turned
+off, so each task needs an answer.
+
+Once the round has merged, its project is closed: the step
+`CloseLabelProject` exports every task with its annotations to
+`s3://<DataBucketName>/labelstudio/<round id>.json` (kept, unlike `backups/`
+it never expires), reads it back, and then deletes the project from Label
+Studio, so nothing of a finished round is left to edit. If the export fails
+the project stays and the execution ends in `LabelProjectNotClosed`; the
+round itself is still `succeeded` and its labels are in Postgres, so the
+leftover project only needs tidying: export it from its page, then delete it.
+To read an archived round:
+`aws s3 cp s3://<DataBucketName>/labelstudio/<round id>.json - | jq length`.
 
 Task images come from presigned links to `raw/` in the data bucket. The
 bucket's CORS rule lets only the Label Studio domain load them. If a task
