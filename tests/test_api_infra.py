@@ -104,8 +104,9 @@ def test_admin_links(t):
     env = _api_fn(t)["Environment"]["Variables"]
     ls = json.dumps(env["LABEL_STUDIO_URL"])
     assert ls.startswith('{"Fn::Join"') and "https://" in ls and ".sslip.io" in ls
-    # MLflow has no public address: admins open it through `scripts/ec2.sh tunnel`.
-    assert env["MLFLOW_URL"] == "http://localhost:5000"
+    # MLflow's public address behind the Cognito gate (tests/test_mlflow_gate_infra.py).
+    mlflow = json.dumps(env["MLFLOW_URL"])
+    assert "https://mlflow." in mlflow and ".sslip.io" in mlflow
 
 
 def test_upload_limit_setting(t):

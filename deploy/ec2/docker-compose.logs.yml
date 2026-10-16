@@ -33,5 +33,7 @@ services:
     logging: *cloudwatch
   viewer-gate:
     logging: *cloudwatch
+  mlflow-gate:
+    logging: *cloudwatch
   caddy:
     logging: *cloudwatch

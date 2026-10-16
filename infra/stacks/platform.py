@@ -7,12 +7,13 @@ Cognito user pool that signs people in, the al-round state machine with
 its Lambdas (infra/stacks/al_round.py), the HTTP API, and Label Studio's
 public entry and webhook.
 
-The EC2 host has no inbound ports except HTTPS for Label Studio (80 and 443,
-Caddy, then the oauth2-proxy Cognito gate for `labelers` / `admins`). The
-owner and the worker reach MLflow (5000) and Postgres (5432) through SSM
-Session Manager port forwarding, so access depends on IAM, not on an IP
-address. The host keeps one Elastic IP across stop and start, so Label
-Studio's address (and the Cognito callback URL) never changes.
+The EC2 host has no inbound ports except HTTPS (80 and 443, Caddy, then an
+oauth2-proxy Cognito gate): Label Studio for `labelers` / `admins`, the image
+viewer and MLflow for `admins`. The owner and the worker also reach MLflow
+(5000), and Postgres (5432), through SSM Session Manager port forwarding, so
+that access depends on IAM, not on an IP address. The host keeps one Elastic
+IP across stop and start, so the public addresses (and the Cognito callback
+URLs) never change.
 
 Lambdas that use Postgres run in a private subnet of the same VPC and reach
 the host on its private IP; the host's security group lets in 5432 from them
@@ -36,6 +37,7 @@ Deploy-time settings come from CDK context (`cdk deploy -c key=value`):
                       Let's Encrypt certificate without owning a domain)
   viewerDomain        image viewer's (FiftyOne) host name (default
                       view.<Elastic IP>.sslip.io)
+  mlflowDomain        MLflow's host name (default mlflow.<Elastic IP>.sslip.io)
 """
 
 from pathlib import Path
@@ -99,6 +101,7 @@ SSM_USER_POOL_ID = f"{SSM_PREFIX}/auth/user-pool-id"
 SSM_LABEL_STUDIO_DOMAIN = f"{SSM_PREFIX}/label-studio/domain"
 SSM_LABEL_STUDIO_CLIENT_ID = f"{SSM_PREFIX}/label-studio/client-id"
 SSM_VIEWER_DOMAIN = f"{SSM_PREFIX}/viewer/domain"
+SSM_MLFLOW_DOMAIN = f"{SSM_PREFIX}/mlflow/domain"
 # Secrets Manager JSON created by the owner (docs/aws-setup.md): admin_email,
 # admin_password, api_token, webhook_secret, cookie_secret. The host reads it
 # at setup; CloudFormation puts api_token and webhook_secret into the Lambdas.
@@ -528,6 +531,10 @@ class PlatformStack(Stack):
         self.viewer_domain = (
             self.node.try_get_context("viewerDomain") or f"view.{eip.attr_public_ip}.sslip.io"
         )
+        # MLflow for ML engineers, through Caddy and a Cognito gate.
+        self.mlflow_domain = (
+            self.node.try_get_context("mlflowDomain") or f"mlflow.{eip.attr_public_ip}.sslip.io"
+        )
         # Caddy: ACME HTTP challenge and redirect on 80, Label Studio on 443.
         for port in (80, 443):
             sg.add_ingress_rule(ec2.Peer.any_ipv4(), ec2.Port.tcp(port), "Label Studio (Caddy)")
@@ -886,14 +893,15 @@ class PlatformStack(Stack):
         self.admin_web_client = self._app_client(
             "AdminWebClient", "admin-web", urls("adminCallbackUrls", DEFAULT_ADMIN_CALLBACK), None
         )
-        # oauth2-proxy in front of Label Studio, and the second one in front of
-        # the image viewer: servers, so they keep a secret.
+        # oauth2-proxy in front of Label Studio, and the ones in front of the
+        # image viewer and MLflow: servers, so they keep a secret.
         self.label_studio_client = self._app_client(
             "LabelStudioClient",
             "label-studio",
             [
                 f"https://{self.label_studio_domain}/oauth2/callback",
                 f"https://{self.viewer_domain}/oauth2/callback",
+                f"https://{self.mlflow_domain}/oauth2/callback",
             ],
             None,
             generate_secret=True,
@@ -907,6 +915,7 @@ class PlatformStack(Stack):
             ),
             ("LabelStudioDomainParam", SSM_LABEL_STUDIO_DOMAIN, self.label_studio_domain),
             ("ViewerDomainParam", SSM_VIEWER_DOMAIN, self.viewer_domain),
+            ("MlflowDomainParam", SSM_MLFLOW_DOMAIN, self.mlflow_domain),
         ]:
             ssm.StringParameter(self, construct_id, parameter_name=name, string_value=value)
 
@@ -993,9 +1002,9 @@ class PlatformStack(Stack):
                 # A deploy setting: the Lambda has no route to SSM.
                 "UPLOAD_DAILY_LIMIT": str(upload_limit),
                 # Links in the admin API: a round's Label Studio project, and
-                # its MLflow run, which admins open through `scripts/ec2.sh tunnel`.
+                # its MLflow run (behind the Cognito gate).
                 "LABEL_STUDIO_URL": f"https://{self.label_studio_domain}",
-                "MLFLOW_URL": "http://localhost:5000",
+                "MLFLOW_URL": f"https://{self.mlflow_domain}",
             },
             **lambda_logging(self, "ApiLogs", "api"),
         )
@@ -1126,6 +1135,7 @@ class PlatformStack(Stack):
         )
         CfnOutput(self, "LabelStudioUrl", value=f"https://{self.label_studio_domain}")
         CfnOutput(self, "ViewerUrl", value=f"https://{self.viewer_domain}")
+        CfnOutput(self, "MlflowUrl", value=f"https://{self.mlflow_domain}")
 
     def _upload_validation(self) -> None:
         """App images: S3 incoming/ -> UploadQueue -> UploadFn (design doc F1

@@ -4,6 +4,8 @@
 #
 #   internet :443 -> caddy -> oauth2-proxy :4180 -> caddy :8081 (guard) -> label-studio :8080
 #   internet :443 -> caddy -> viewer-gate :4180 -> viewer-app :5151 (admins only)
+#   internet :443 -> caddy -> mlflow-gate :4180 -> mlflow :5000 (admins only)
+#   worker, owner -> SSM tunnel -> mlflow :5000
 #   label step Lambdas (VPC) -> label-studio :8080 with the admin API token
 #
 # Secrets come from .env next to this file (gitignored). On EC2, write .env
@@ -75,7 +77,15 @@ services:
       # Clients (the worker) write artifacts straight to S3 with their own credentials.
       - --default-artifact-root=s3://${MODELS_BUCKET:?set MODELS_BUCKET in .env}/mlflow-artifacts
       - --no-serve-artifacts
+      # MLflow 3 refuses unknown Host headers and cross-origin POSTs. Its
+      # public name comes through mlflow-gate; the SSM tunnel arrives as
+      # localhost:<local port>. Listing hosts drops MLflow's localhost
+      # defaults, so the tunnel's names are listed here too.
+      - --allowed-hosts=${MLFLOW_DOMAIN},localhost,localhost:*,127.0.0.1,127.0.0.1:*
+      - --cors-allowed-origins=https://${MLFLOW_DOMAIN}
     ports:
+      # The worker and the owner come through the SSM tunnel; people with a
+      # browser come through Caddy and mlflow-gate.
       - "5000:5000"
 
   # Label Studio Community. The first start creates the admin account and its
@@ -229,8 +239,37 @@ services:
       OAUTH2_PROXY_SKIP_PROVIDER_BUTTON: "true"
       OAUTH2_PROXY_PASS_HOST_HEADER: "true"
 
-  # HTTPS with Let's Encrypt certificates for LS_DOMAIN and VIEWER_DOMAIN
-  # (renewed by Caddy). It also serves the Label Studio guard on :8081, which
+  # MLflow has no login of its own: a third oauth2-proxy on the same Cognito
+  # client lets only the admins group through, so ML engineers review runs
+  # in the browser without a tunnel.
+  mlflow-gate:
+    image: quay.io/oauth2-proxy/oauth2-proxy:v7.15.5
+    restart: unless-stopped
+    depends_on:
+      - mlflow
+    command:
+      - --allowed-group=admins
+      - --email-domain=*
+    environment:
+      OAUTH2_PROXY_PROVIDER: oidc
+      OAUTH2_PROXY_PROVIDER_DISPLAY_NAME: Cognito
+      OAUTH2_PROXY_OIDC_ISSUER_URL: ${OAUTH2_PROXY_OIDC_ISSUER_URL:?set it in .env}
+      OAUTH2_PROXY_CLIENT_ID: ${OAUTH2_PROXY_CLIENT_ID:?set it in .env}
+      OAUTH2_PROXY_CLIENT_SECRET: ${OAUTH2_PROXY_CLIENT_SECRET:?set it in .env}
+      OAUTH2_PROXY_COOKIE_SECRET: ${OAUTH2_PROXY_COOKIE_SECRET:?set it in .env}
+      OAUTH2_PROXY_REDIRECT_URL: https://${MLFLOW_DOMAIN}/oauth2/callback
+      OAUTH2_PROXY_SCOPE: openid email profile
+      OAUTH2_PROXY_CODE_CHALLENGE_METHOD: S256
+      OAUTH2_PROXY_OIDC_GROUPS_CLAIM: cognito:groups
+      OAUTH2_PROXY_UPSTREAMS: http://mlflow:5000
+      OAUTH2_PROXY_HTTP_ADDRESS: 0.0.0.0:4180
+      OAUTH2_PROXY_REVERSE_PROXY: "true"
+      OAUTH2_PROXY_COOKIE_SECURE: "true"
+      OAUTH2_PROXY_SKIP_PROVIDER_BUTTON: "true"
+      OAUTH2_PROXY_PASS_HOST_HEADER: "true"
+
+  # HTTPS with Let's Encrypt certificates for LS_DOMAIN, VIEWER_DOMAIN and
+  # MLFLOW_DOMAIN (renewed by Caddy). It also serves the Label Studio guard on :8081, which
   # is not published: only oauth2-proxy calls it, over the compose network.
   caddy:
     image: caddy:2.11.7-alpine
@@ -238,9 +277,11 @@ services:
     depends_on:
       - oauth2-proxy
       - viewer-gate
+      - mlflow-gate
     environment:
       LS_DOMAIN: ${LS_DOMAIN}
       VIEWER_DOMAIN: ${VIEWER_DOMAIN:?set VIEWER_DOMAIN in .env}
+      MLFLOW_DOMAIN: ${MLFLOW_DOMAIN:?set MLFLOW_DOMAIN in .env}
     volumes:
       - ./caddy/Caddyfile:/etc/caddy/Caddyfile:ro
       # Certificates survive restarts, so Let's Encrypt limits are never hit.

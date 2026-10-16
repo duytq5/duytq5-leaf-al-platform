@@ -88,7 +88,7 @@ export CDK_DEFAULT_ACCOUNT=$(aws sts get-caller-identity --query Account --outpu
 | VPC + EC2 instance | One public subnet for the host, no NAT gateway. Amazon Linux 2023, `t3.medium` (2 vCPU, 4 GB), IMDSv2, no SSH key: connect with Session Manager. Docker, compose and cron installed, then Postgres, MLflow and Label Studio (behind Caddy and oauth2-proxy) started on first boot. |
 | Elastic IP | The host's fixed public address, so Label Studio's URL and its Cognito callback survive stop and start. About $3.60 a month, charged also while the instance is stopped. |
 | EBS data volume (`/data`) | gp3 20 GB, encrypted, mounted at `/data` on first boot. Kept when the instance or the stack is deleted. |
-| Security group | 80 and 443 from anywhere (Label Studio through Caddy and the Cognito gate); Postgres (5432) and Label Studio's API (8080) from the Lambdas' security group only. You and the worker reach MLflow (5000) and Postgres (5432) through SSM port forwarding (section 3). |
+| Security group | 80 and 443 from anywhere (Label Studio, the image viewer and MLflow, each through Caddy and a Cognito gate); Postgres (5432) and Label Studio's API (8080) from the Lambdas' security group only. You and the worker reach MLflow (5000) and Postgres (5432) through SSM port forwarding (section 3). |
 | Lambda subnet | Private subnet on a second address range (10.1.0.0/24), no internet route; S3 through a free gateway endpoint. |
 | `al-round` state machine + 7 Lambdas | One AL round: mark running, snapshot, train and score jobs on SQS, select, wait for labels (the round's Label Studio project, section 3b), merge; on any error the round is marked failed and its queued images go back to the pool. ARN in SSM `/leaf-al/state-machines/al-round`. Lambda logs kept 30 days. |
 | GitHub Actions role | OIDC provider for `token.actions.githubusercontent.com` and role `leaf-al-github-actions`, assumable only by workflow runs on `main` of the ops repo. It may start and watch `model-release` executions, start, watch and stop `al-round` executions, invoke the two round-control Lambdas and read the state machine ARNs from SSM (section 7). |
@@ -116,6 +116,7 @@ Deploy-time settings are CDK context values (`-c key=value`):
 | `adminCallbackUrls` | `http://localhost:8080/auth/callback` | Comma-separated sign-in redirects of admin tools |
 | `labelStudioDomain` | `<Elastic IP>.sslip.io` | Label Studio's host name. The default needs no domain: sslip.io resolves it to the IP, and Caddy gets a Let's Encrypt certificate for it |
 | `viewerDomain` | `view.<Elastic IP>.sslip.io` | Image viewer's (FiftyOne) host name, section 3c |
+| `mlflowDomain` | `mlflow.<Elastic IP>.sslip.io` | MLflow's host name, section 3d |
 
 ## 1. Secrets in SSM Parameter Store (before the first deploy)
 
@@ -291,7 +292,8 @@ aws ssm start-session --target <InstanceId> \
   --parameters portNumber=5000,localPortNumber=5000
 ```
 
-MLflow is then at `http://localhost:5000`. For Postgres, run a second session
+MLflow is then at `http://localhost:5000` (in a browser, `MlflowUrl` is
+easier, section 3d). For Postgres, run a second session
 with `portNumber=5432,localPortNumber=5432` and connect to `localhost:5432`.
 The instance ID stays the same when the instance stops and starts.
 
@@ -470,6 +472,28 @@ After `cdk deploy` (adds the domain and the Cognito callback), run
 admin account. The viewer adds about 1.3 GB of memory limits to the host; if
 Label Studio or MLflow get slow, `docker stats` shows who uses what, and
 `instanceType=t3.large` is the next size up.
+
+## 3d. MLflow in the browser
+
+ML engineers review runs (metrics, params, the recipe and git SHA) at
+`MlflowUrl` without a tunnel:
+
+```
+browser -> https://<MlflowUrl> (Caddy, Let's Encrypt)
+        -> mlflow-gate (oauth2-proxy): Cognito sign-in, group admins only
+        -> mlflow :5000
+worker  -> SSM tunnel -> mlflow :5000 (unchanged)
+```
+
+Give an engineer a Cognito user in the `admins` group (section 6). MLflow has
+no roles of its own, so anyone through the gate can also rename or delete
+runs; artifacts stay in S3 and the worker writes them with its own keys.
+MLflow 3 accepts only the host names in its `--allowed-hosts` flag
+(`docker-compose.yml`): `MLFLOW_DOMAIN` and `localhost` on any port, for the
+tunnel. The admin API's `mlflow_run_url` links now point here.
+
+After `cdk deploy` (adds the domain and the Cognito callback), run
+`scripts/ec2.sh setup`, then open `MlflowUrl`.
 
 ## 4. Worker credentials (on the RTX 5070 machine)
 

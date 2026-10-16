@@ -106,7 +106,7 @@ def test_cognito_gate_client_accepts_the_viewer_callback(t):
         if c["Properties"]["ClientName"] == "label-studio"
     ]
     urls = [json.dumps(u) for u in client["CallbackURLs"]]
-    assert len(urls) == 2
+    assert len(urls) == 3  # Label Studio, the viewer and MLflow
     assert any('"https://view.' in u and "/oauth2/callback" in u for u in urls)
     custom = _template(viewerDomain="view.example.com")
     (client,) = [
