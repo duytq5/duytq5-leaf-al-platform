@@ -58,6 +58,13 @@ def split_uri(uri: str) -> tuple[str, str]:
     return m.group(1), m.group(2)
 
 
+def content_type(key: str) -> str:
+    """The Content-Type S3 serves an object with. Without one S3 serves
+    binary/octet-stream, and the app's HTTP client then reads manifest.json as
+    text, not JSON, and drops the model."""
+    return "application/json" if key.endswith(".json") else "application/octet-stream"
+
+
 class S3Store:
     def __init__(self, client) -> None:
         self.client = client
@@ -68,7 +75,7 @@ class S3Store:
 
     def put(self, uri: str, body: bytes) -> None:
         bucket, key = split_uri(uri)
-        self.client.put_object(Bucket=bucket, Key=key, Body=body)
+        self.client.put_object(Bucket=bucket, Key=key, Body=body, ContentType=content_type(key))
 
     def exists(self, uri: str) -> bool:
         from botocore.exceptions import ClientError
