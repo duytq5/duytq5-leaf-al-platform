@@ -62,6 +62,7 @@ DATA_BUCKET=$(get buckets/data)
 DATA_DIR=/data
 LS_DOMAIN=$(get label-studio/domain)
 VIEWER_DOMAIN=$(get viewer/domain)
+MLFLOW_DOMAIN=$(get mlflow/domain)
 LS_ADMIN_EMAIL=$ls_admin_email
 LS_ADMIN_PASSWORD=$ls_admin_password
 LS_API_TOKEN=$ls_api_token

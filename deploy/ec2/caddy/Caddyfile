@@ -13,6 +13,13 @@
 	reverse_proxy viewer-gate:4180
 }
 
+# MLflow, for ML engineers to review runs: same pattern, its own oauth2-proxy
+# lets only the Cognito `admins` group through.
+{$MLFLOW_DOMAIN} {
+	encode gzip
+	reverse_proxy mlflow-gate:4180
+}
+
 # Label Studio guard, reached only by oauth2-proxy over the compose network
 # (port 8081 is not published). Label Studio Community has no roles, so every
 # labeler could create, change or delete projects; this refuses that to anyone
