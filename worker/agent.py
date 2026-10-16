@@ -202,8 +202,16 @@ class DockerRunner:
             for key, value in sorted(self.env.items()):
                 cmd += ["-e", f"{key}={value}"]
             cmd += [job.image, "python", "-m", "worker.run_job"]
+            # The container writes UTF-8 (progress bars and all); Windows would
+            # otherwise decode it with its ANSI code page and crash mid-read.
             done = self.run_process(
-                cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, check=False
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                check=False,
             )
             logs = done.stdout or ""
             for line in logs.splitlines():
