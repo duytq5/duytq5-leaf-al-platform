@@ -217,6 +217,36 @@ def cmd_seed(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_images_rehash(args: argparse.Namespace) -> int:
+    """Point app images stored under the upload's sha256 at their file's sha256
+    (db/rehash.py). Shows the fixes; changes S3 and Postgres only with --apply."""
+    bucket = args.bucket or os.environ.get("DATA_BUCKET")
+    if not bucket:
+        print("set --bucket or DATA_BUCKET")
+        return 1
+
+    from db import connect, rehash
+
+    store = rehash.S3Store(bucket)
+    with connect() as conn:
+        try:
+            fixes = rehash.plan(conn, store)
+        except LookupError as e:
+            print(e)
+            return 1
+        if not fixes:
+            print("nothing to fix: every app image matches its sha256")
+            return 0
+        for f in fixes:
+            print(f"image {f.image_id} ({f.dataset}): {f.old_key} -> {f.new_key}")
+        if not args.apply:
+            print(f"dry run: {len(fixes)} to fix; run again with --apply to fix them")
+            return 0
+        rehash.apply(conn, store, fixes)
+    print(f"fixed {len(fixes)}")
+    return 0
+
+
 def cmd_logs(args: argparse.Namespace) -> int:
     from cli import logs
 
@@ -272,6 +302,16 @@ def main(argv: list[str] | None = None) -> int:
     db_sub = db.add_subparsers(dest="db_command", required=True)
     db_sub.add_parser("migrate", help="create or update the tables; safe to re-run")
 
+    images = sub.add_parser("images", help="image commands (needs DATABASE_URL)")
+    images_sub = images.add_subparsers(dest="images_command", required=True)
+    rehash = images_sub.add_parser(
+        "rehash",
+        help="fix app images stored under the upload's sha256 (dry run unless --apply)",
+        description="Needs AWS credentials (AWS_PROFILE=leaf-al) and DATABASE_URL.",
+    )
+    rehash.add_argument("--bucket", help="data bucket (default: $DATA_BUCKET)")
+    rehash.add_argument("--apply", action="store_true", help="copy the files and update the rows")
+
     seed = sub.add_parser("seed", help="upload a dataset to S3 and record it with a fixed split")
     seed.add_argument("config", help="configs/datasets/<name>.yaml")
     seed.add_argument("source", help="folder with one sub-folder of JPEGs per label")
@@ -296,6 +336,8 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     if args.command == "db":
         return {"migrate": cmd_db_migrate}[args.db_command](args)
+    if args.command == "images":
+        return {"rehash": cmd_images_rehash}[args.images_command](args)
     handlers = {
         "strategies": cmd_strategies,
         "recipes": cmd_recipes,
