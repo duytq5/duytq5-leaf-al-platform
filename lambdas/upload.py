@@ -11,10 +11,13 @@ through the gateway endpoint) takes each new object:
 3. Decodes it with Pillow: a whole JPEG or PNG of the declared type, at most
    MAX_PIXELS. Turns it the way the phone showed it (EXIF orientation), then
    re-encodes it as a JPEG without EXIF, so no GPS or camera data is kept.
-4. For each dataset: writes raw/{dataset}/{sha256}.jpg and adds the image to
-   the train pool (split train, status unlabeled, source edge), then links
-   the captures. An image the dataset already has (e.g. from the seed) keeps
-   its row, split and file; only the captures are linked.
+4. For each dataset: writes raw/{dataset}/{clean sha256}.jpg and adds the
+   image to the train pool (split train, status unlabeled, source edge), then
+   links the captures. The row and the key name the clean JPEG's bytes, not
+   the upload's: the worker checks every raw/ file against images.sha256.
+   The captures keep the upload's sha256. An image the dataset already has
+   (e.g. the same file from the seed) keeps its row, split and file; only the
+   captures are linked.
 5. Deletes the incoming/ object.
 
 A refused upload is deleted and its captures stay unlinked; nothing reaches
@@ -111,20 +114,22 @@ def _has_image(conn: psycopg.Connection, dataset_id: int, sha256: str) -> bool:
     return row is not None
 
 
-def _add_to_pool(conn: psycopg.Connection, dataset_id: int, sha256: str, key: str, kind: str):
+def _add_to_pool(
+    conn: psycopg.Connection, dataset_id: int, image_sha: str, key: str, upload_sha: str, kind: str
+):
     with conn.transaction():
         conn.execute(
             "INSERT INTO images (dataset_id, sha256, s3_key, status, split, source)"
             " VALUES (%s, %s, %s, 'unlabeled', 'train', 'edge')"
             " ON CONFLICT (dataset_id, sha256) DO NOTHING",
-            (dataset_id, sha256, key),
+            (dataset_id, image_sha, key),
         )
         conn.execute(
             "UPDATE captures SET image_id ="
             " (SELECT id FROM images WHERE dataset_id = %s AND sha256 = %s)"
             " WHERE dataset_id = %s AND sha256 = %s AND image_id IS NULL"
             " AND content_type = %s",
-            (dataset_id, sha256, dataset_id, sha256, kind),
+            (dataset_id, image_sha, dataset_id, upload_sha, kind),
         )
 
 
@@ -156,11 +161,14 @@ def process(conn: psycopg.Connection, store, key: str) -> str:
     if not targets:
         return reject(f"it is {kind}, not the declared type")
 
+    clean_sha = hashlib.sha256(jpeg).hexdigest()
     for dataset_id, name in targets:
-        target = raw_key(name, sha256)
-        if not _has_image(conn, dataset_id, sha256):  # else its file is in place
+        # The upload's own bytes may be in the dataset already (the seed file).
+        image_sha = sha256 if _has_image(conn, dataset_id, sha256) else clean_sha
+        target = raw_key(name, image_sha)
+        if not _has_image(conn, dataset_id, image_sha):  # else its file is in place
             store.put_jpeg(target, jpeg)
-        _add_to_pool(conn, dataset_id, sha256, target, kind)
+        _add_to_pool(conn, dataset_id, image_sha, target, sha256, kind)
     store.delete(key)
     log.info("stored %s for %s", key, ", ".join(name for _, name in targets))
     return "stored"

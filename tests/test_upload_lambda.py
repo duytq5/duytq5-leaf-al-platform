@@ -1,7 +1,7 @@
 """Upload validation (design doc F1 step 6): an app image lands in
 incoming/{sha256}.jpg, S3 notifies a queue, and lambdas/upload.py checks it,
-moves it to raw/{dataset}/{sha256}.jpg as a clean JPEG, adds it to the
-dataset's train pool and links the waiting captures.
+re-encodes it as a clean JPEG, stores that at raw/{dataset}/{clean sha256}.jpg,
+adds it to the dataset's train pool and links the waiting captures.
 
 Against a real Postgres (TEST_DATABASE_URL); S3 is an in-memory fake.
 """
@@ -91,6 +91,15 @@ def _linked(db) -> list:
     return [r[0] for r in db.execute("SELECT image_id FROM captures ORDER BY id")]
 
 
+def _stored(db, world, dataset_name="durian") -> bytes:
+    """The raw/ file of the dataset's one image."""
+    key = db.execute(
+        "SELECT i.s3_key FROM images i JOIN datasets d ON d.id = i.dataset_id WHERE d.name = %s",
+        (dataset_name,),
+    ).fetchone()[0]
+    return world["store"].objects[key]
+
+
 def _images(db) -> list[tuple]:
     return db.execute(
         "SELECT d.name, i.sha256, i.s3_key, i.split, i.status, i.source"
@@ -107,13 +116,29 @@ def test_a_jpeg_joins_the_train_pool(db, world):
     key = _upload(world, data)
     assert upload.process(db, world["store"], key) == "stored"
 
-    sha = _sha(data)
+    store = world["store"].objects
+    sha = _sha(_stored(db, world))  # the clean JPEG, not the upload
     raw = f"raw/durian/{sha}.jpg"
     assert _images(db) == [("durian", sha, raw, "train", "unlabeled", "edge")]
     assert _linked(db) == [db.execute("SELECT id FROM images").fetchone()[0]]
-    store = world["store"].objects
     assert key not in store  # moved, not copied
     assert Image.open(io.BytesIO(store[raw])).format == "JPEG"
+
+
+def test_the_stored_file_matches_its_sha256(db, world):
+    """The worker checks every raw/ file against images.sha256 before using it,
+    so the row and the key name the clean JPEG's bytes. The capture keeps the
+    upload's sha256: that is what the phone hashed."""
+    exif = Image.Exif()
+    exif[0x8825] = {2: (10.0, 45.0, 0.0)}  # GPS, removed by the re-encode
+    data = _jpeg(exif=exif)
+    _capture(db, world, data)
+    upload.process(db, world["store"], _upload(world, data))
+
+    ((_, sha, key, *_),) = _images(db)
+    assert _sha(world["store"].objects[key]) == sha != _sha(data)
+    assert key == f"raw/durian/{sha}.jpg"
+    assert db.execute("SELECT sha256 FROM captures").fetchone()[0] == _sha(data)
 
 
 def test_exif_is_applied_then_removed(db, world):
@@ -124,7 +149,7 @@ def test_exif_is_applied_then_removed(db, world):
     _capture(db, world, data)
     upload.process(db, world["store"], _upload(world, data))
 
-    out = Image.open(io.BytesIO(world["store"].objects[f"raw/durian/{_sha(data)}.jpg"]))
+    out = Image.open(io.BytesIO(_stored(db, world)))
     assert out.size == (20, 40)  # stored the way the phone showed it
     assert len(out.getexif()) == 0
     assert "exif" not in out.info
@@ -134,7 +159,7 @@ def test_a_png_is_stored_as_jpeg(db, world):
     data = _png()
     _capture(db, world, data, content_type="image/png")
     assert upload.process(db, world["store"], _upload(world, data)) == "stored"
-    out = Image.open(io.BytesIO(world["store"].objects[f"raw/durian/{_sha(data)}.jpg"]))
+    out = Image.open(io.BytesIO(_stored(db, world)))
     assert (out.format, out.mode) == ("JPEG", "RGB")
 
 
@@ -147,7 +172,7 @@ def test_one_image_sent_for_two_datasets_joins_both(db, world):
     assert [r[0] for r in _images(db)] == ["durian", "durian_fruit"]
     assert None not in _linked(db)
     assert len(set(_linked(db))) == 2
-    assert f"raw/durian_fruit/{_sha(data)}.jpg" in world["store"].objects
+    assert _stored(db, world, "durian_fruit") == _stored(db, world)
 
 
 def test_an_image_the_dataset_has_keeps_its_row_and_file(db, world):
@@ -166,6 +191,18 @@ def test_an_image_the_dataset_has_keeps_its_row_and_file(db, world):
     assert _images(db) == [("durian", sha, raw, "test", "labeled", "seed")]
     assert _linked(db) == [seed_id]
     assert world["store"].objects[raw] == b"original seed bytes"
+
+
+def test_the_same_photo_sent_again_later_joins_its_image(db, world):
+    """A second capture of a photo already stored: same clean JPEG, same row."""
+    data = _jpeg()
+    _capture(db, world, data)
+    upload.process(db, world["store"], _upload(world, data))
+    before = _images(db)
+    _capture(db, world, data)
+    assert upload.process(db, world["store"], _upload(world, data)) == "stored"
+    assert _images(db) == before
+    assert len(set(_linked(db))) == 1 and None not in _linked(db)
 
 
 def test_processing_again_changes_nothing(db, world):
