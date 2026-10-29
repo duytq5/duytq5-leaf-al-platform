@@ -135,7 +135,7 @@ class FakeOpener:
         out = self.responses.pop(0)
         if isinstance(out, Exception):
             raise out
-        return io.BytesIO(json.dumps(out).encode())
+        return io.BytesIO(b"" if out is None else json.dumps(out).encode())
 
 
 def test_client_sends_the_token_and_json():
@@ -186,3 +186,50 @@ def test_client_errors_name_the_call():
     client = ls.LabelStudio("http://ls", "tok", opener=FakeOpener([urllib.error.URLError("x")]))
     with pytest.raises(ls.LabelStudioError, match="unreachable"):
         client.projects()
+
+
+def _not_found(path: str) -> urllib.error.HTTPError:
+    return urllib.error.HTTPError(path, 404, "Not Found", {}, io.BytesIO(b'{"detail":"nope"}'))
+
+
+def test_a_missing_object_is_its_own_error():
+    client = ls.LabelStudio("http://ls", "tok", opener=FakeOpener([_not_found("/api/users/9/")]))
+    with pytest.raises(ls.LabelStudioNotFound, match="GET /api/users/9/: HTTP 404"):
+        client.user(9)
+
+
+def test_client_looks_up_a_user():
+    opener = FakeOpener([{"id": 3, "email": "expert@example.com"}])
+    client = ls.LabelStudio("http://ls:8080", "tok", opener=opener)
+    assert client.user(3) == {"id": 3, "email": "expert@example.com"}
+    assert opener.requests[0].full_url == "http://ls:8080/api/users/3/"
+
+
+def test_client_exports_every_task_with_its_annotations():
+    tasks = [{"id": 1, "data": {"image_id": 4}, "annotations": [{"result": []}]}]
+    opener = FakeOpener([tasks])
+    client = ls.LabelStudio("http://ls:8080", "tok", opener=opener)
+    assert client.export(7) == tasks
+    (req,) = opener.requests
+    assert req.get_method() == "GET"
+    # Without download_all_tasks Label Studio leaves out tasks with no annotation.
+    assert req.full_url == (
+        "http://ls:8080/api/projects/7/export?exportType=JSON&download_all_tasks=true"
+    )
+
+
+def test_deleting_a_project_tolerates_one_already_gone():
+    opener = FakeOpener([None, _not_found("/api/projects/7/")])
+    client = ls.LabelStudio("http://ls:8080", "tok", opener=opener)
+    assert client.delete_project(7) is True
+    assert client.delete_project(7) is False
+    assert [(r.get_method(), r.full_url) for r in opener.requests] == [
+        ("DELETE", "http://ls:8080/api/projects/7/")
+    ] * 2
+
+
+def test_deleting_a_project_raises_other_errors():
+    http = urllib.error.HTTPError("/api/projects/7/", 500, "Oops", {}, io.BytesIO(b"x"))
+    client = ls.LabelStudio("http://ls", "tok", opener=FakeOpener([http]))
+    with pytest.raises(ls.LabelStudioError, match="HTTP 500"):
+        client.delete_project(7)

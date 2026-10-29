@@ -3,7 +3,9 @@ names, the webhook body and a small REST client.
 
 One project per round, named "ACTIVE <dataset> <round id prefix>" while it
 waits for labels and "DONE ..." once all k images are labeled; its description
-holds the full round id, which is how a retried step finds it again.
+holds the full round id, which is how a retried step finds it again. After the
+round merges, its tasks and annotations are exported to S3 and the project is
+deleted (lambdas/labeling.py close_project).
 
 Tasks carry s3:// links to raw/. The project's S3 storage (no sync, presign on)
 lets Label Studio sign them with the EC2 instance role each time a labeler
@@ -40,6 +42,10 @@ TIMEOUT_SECONDS = 20
 class LabelStudioError(RuntimeError):
     """Label Studio answered with an error or could not be reached. The state
     machine retries the label step on it (Label Studio may be restarting)."""
+
+
+class LabelStudioNotFound(LabelStudioError):
+    """Label Studio answered 404: the project or user does not exist."""
 
 
 def label_config(classes: list[dict[str, str]]) -> str:
@@ -152,7 +158,8 @@ class LabelStudio:
                 raw = resp.read()
         except urllib.error.HTTPError as e:
             detail = e.read()[:300].decode(errors="replace")
-            raise LabelStudioError(f"{method} {path}: HTTP {e.code} {detail}") from e
+            error = LabelStudioNotFound if e.code == 404 else LabelStudioError
+            raise error(f"{method} {path}: HTTP {e.code} {detail}") from e
         except (urllib.error.URLError, TimeoutError, OSError) as e:
             raise LabelStudioError(f"{method} {path}: Label Studio unreachable ({e})") from e
         return json.loads(raw) if raw else None
@@ -218,3 +225,21 @@ class LabelStudio:
 
     def import_tasks(self, project_id: int, tasks: list[dict]) -> None:
         self._call("POST", f"/api/projects/{project_id}/import", tasks)
+
+    def export(self, project_id: int) -> list[dict]:
+        """Every task of the project with its data, annotations and predictions."""
+        return self._call(
+            "GET", f"/api/projects/{project_id}/export?exportType=JSON&download_all_tasks=true"
+        )
+
+    def delete_project(self, project_id: int) -> bool:
+        """Delete the project with its tasks, storages and webhooks. False when it
+        was already gone."""
+        try:
+            self._call("DELETE", f"/api/projects/{project_id}/")
+        except LabelStudioNotFound:
+            return False
+        return True
+
+    def user(self, user_id: int) -> dict:
+        return self._call("GET", f"/api/users/{user_id}/")

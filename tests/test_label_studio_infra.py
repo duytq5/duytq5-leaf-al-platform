@@ -121,7 +121,8 @@ def test_label_step_and_record_lambda_run_in_the_vpc(t):
     fns = _functions(t)
     start = fns["lambdas.labeling.start_handler"]
     record = fns["lambdas.labeling.record_handler"]
-    for fn in (start, record):
+    close = fns["lambdas.labeling.close_handler"]
+    for fn in (start, record, close):
         assert fn["VpcConfig"]["SubnetIds"] == [{"Ref": "LambdaSubnet"}]
         env = fn["Environment"]["Variables"]
         assert ":8080" in json.dumps(env["LS_URL"])

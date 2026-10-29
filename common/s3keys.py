@@ -7,6 +7,7 @@ s3://al-data/
   scores/{round_id}/pool-manifest.parquet   (input of the score job)
   scores/{round_id}/pool.parquet
   selections/{round_id}.json
+  labelstudio/{round_id}.json               (the round's Label Studio export)
 s3://al-models/
   mlflow-artifacts/
   edge/{model}/{version}/model.onnx, manifest.json
@@ -37,6 +38,10 @@ def scores_key(round_id: UUID | str) -> str:
 
 def selection_key(round_id: UUID | str) -> str:
     return f"selections/{round_id}.json"
+
+
+def label_studio_export_key(round_id: UUID | str) -> str:
+    return f"labelstudio/{round_id}.json"
 
 
 def edge_prefix(model: str, version: int) -> str:

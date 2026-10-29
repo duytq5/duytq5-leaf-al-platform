@@ -8,6 +8,9 @@ Postgres, and Label Studio on the host's private IP.
   record_label    called by the webhook Lambda for each submitted annotation:
                   appends the expert's label (or marks the image rejected) and,
                   once all k images are done, hands back the task token
+  close_project   (CloseLabelProject, after Merge) exports the round's project
+                  to S3 and deletes it, so no finished round stays editable;
+                  its labels are already in Postgres
 
 The webhook Lambda (lambdas/label_studio_hook.py) runs outside the VPC and
 calls SendTaskSuccess with that token: these Lambdas have no route to the Step
@@ -20,6 +23,7 @@ nothing new. Webhooks of one round are serialized on the round row, so the last
 two labels arriving together cannot both miss that the round is complete.
 """
 
+import json
 import logging
 import os
 from typing import Any
@@ -28,11 +32,19 @@ from uuid import UUID
 import numpy as np
 import psycopg
 
-from common.s3keys import raw_key, scores_key
+from common.s3keys import label_studio_export_key, raw_key, scores_key
 from lambdas import label_studio as ls
 from lambdas.logs import traced
 from lambdas.postgres import open_db
-from lambdas.round import S3Store, Store, _classes, _running, _selection, read_scores
+from lambdas.round import (
+    RoundError,
+    S3Store,
+    Store,
+    _classes,
+    _running,
+    _selection,
+    read_scores,
+)
 
 log = logging.getLogger(__name__)
 RAW_PREFIX = "raw/"
@@ -184,6 +196,66 @@ def record_label(conn: psycopg.Connection, store: Store, event: ls.LabelEvent) -
     return out
 
 
+def labeler(studio: ls.LabelStudio, labeled_by: str) -> str:
+    """The labeler's email for a "label-studio:<user id>" from a webhook that did
+    not carry it. Anything else, or a failed lookup, is kept as it is: a label
+    is never lost for want of an email."""
+    prefix = "label-studio:"
+    user_id = labeled_by.removeprefix(prefix)
+    if not labeled_by.startswith(prefix) or not user_id.isdigit():
+        return labeled_by
+    try:
+        email = studio.user(int(user_id)).get("email")
+    except ls.LabelStudioError:
+        log.warning("could not look up Label Studio user %s", user_id, exc_info=True)
+        return labeled_by
+    return email if isinstance(email, str) and email else labeled_by
+
+
+def close_project(
+    conn: psycopg.Connection, store: Store, studio: ls.LabelStudio, round_id: UUID
+) -> dict[str, Any]:
+    """Export a merged round's project (tasks with their annotations) to
+    labelstudio/<round id>.json, check it is stored, then delete the project.
+    Never deletes what was not archived: a failed or short export raises and
+    keeps the project. A retry after the delete finds the export in S3 and the
+    project gone, which is fine."""
+    row = conn.execute(
+        "SELECT status, ls_project_id FROM rounds WHERE id = %s", (round_id,)
+    ).fetchone()
+    if row is None:
+        raise RoundError(f"round {round_id} does not exist")
+    status, project_id = row
+    if status != "succeeded":
+        raise RoundError(f"round {round_id} is {status}, not succeeded")
+    if project_id is None:
+        return {"project_id": None, "export": None, "tasks": None, "deleted": False}
+
+    key = label_studio_export_key(round_id)
+    tasks = None
+    if store.get(key) is None:
+        try:
+            expected = studio.project(project_id).get("task_number")
+            exported = studio.export(project_id)
+        except ls.LabelStudioNotFound as e:
+            raise RoundError(
+                f"Label Studio project {project_id} of round {round_id} is gone and was never"
+                f" archived; its labels are in Postgres"
+            ) from e
+        if not isinstance(exported, list) or len(exported) != expected:
+            got = len(exported) if isinstance(exported, list) else "no"
+            raise ls.LabelStudioError(
+                f"export of project {project_id} has {got} of {expected} tasks; not deleting it"
+            )
+        body = json.dumps(exported, ensure_ascii=False).encode()
+        store.put(key, body)
+        if store.get(key) != body:
+            raise ls.LabelStudioError(f"{key} was not stored; not deleting project {project_id}")
+        tasks = len(exported)
+    deleted = studio.delete_project(project_id)
+    return {"project_id": project_id, "export": key, "tasks": tasks, "deleted": deleted}
+
+
 # --- Lambda handlers -------------------------------------------------------------
 
 
@@ -214,7 +286,7 @@ def record_handler(event: dict, _context) -> dict:
         round_id=UUID(event["round_id"]),
         image_id=int(event["image_id"]),
         choice=event["choice"],
-        labeled_by=event["labeled_by"],
+        labeled_by=labeler(_studio(), event["labeled_by"]),
     )
     with open_db() as conn:
         out = record_label(conn, S3Store(os.environ["DATA_BUCKET"]), ev)
@@ -225,3 +297,11 @@ def record_handler(event: dict, _context) -> dict:
         except ls.LabelStudioError:
             log.exception("could not mark Label Studio project %s DONE", out["project_id"])
     return out
+
+
+@traced
+def close_handler(event: dict, _context) -> dict:
+    with open_db() as conn:
+        return close_project(
+            conn, S3Store(os.environ["DATA_BUCKET"]), _studio(), UUID(event["round_id"])
+        )
